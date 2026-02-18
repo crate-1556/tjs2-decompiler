@@ -313,11 +313,14 @@ class YesNoDialogWindow {
                 this.close();
             }
         } else if (arg0.type == "onKeyDown" && arg0.target === this) {
-            if (arg0.key == this.VK_PADLEFT) {
+            switch (arg0.key) {
+            case this.VK_PADLEFT:
                 this.yesButton.focus();
-            } else if (arg0.key == this.VK_PADRIGHT) {
+                break;
+            case this.VK_PADRIGHT:
                 this.noButton.focus();
-            } else if (arg0.key == this.VK_PAD1) {
+                break;
+            case this.VK_PAD1:
                 if (this.focusedLayer == this.yesButton) {
                     this.result = 1;
                     this.close();
@@ -325,9 +328,11 @@ class YesNoDialogWindow {
                     this.result = 0;
                     this.close();
                 }
-            } else if (arg0.key == this.VK_PAD2) {
+                break;
+            case this.VK_PAD2:
                 this.result = 0;
                 this.close();
+                break;
             }
         }
     }
@@ -366,4 +371,4 @@ The decompiler has been validated against all TJS2 scripts contained within the 
 - [x] [KAGEX3/system](https://github.com/krkrz/krkr2/tree/master/kirikiri2/branches/kag3ex3/template/system) 
 - [ ] All script files of a complete game / 一部游戏的全部脚本资源 （PLAN）
 
-**NOTE**: 前3个dir还存在少量BUG，以函数为单位目前准确率在98%左右，近期会再更新一次以达到所有部分完全匹配。
+**NOTE**: 前3个dir还存在少量BUG，以函数为单位目前准确率在99%左右，等待近期下一次更新。

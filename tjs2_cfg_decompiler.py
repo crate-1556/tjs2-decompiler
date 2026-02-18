@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import sys
 from typing import List, Optional
 
@@ -8,18 +6,16 @@ from tjs2_decompiler import (
     ReturnStmt, decode_instructions
 )
 from tjs2_cfg import (
-    build_cfg, compute_dominators, compute_postdominators, print_cfg
+    build_cfg, compute_dominators, compute_postdominators
 )
 from tjs2_structuring import (
     detect_loops, build_region_tree, generate_code
 )
 
-
 class CFGDecompiler(Decompiler):
 
-    def __init__(self, loader: BytecodeLoader, debug_cfg: bool = False):
+    def __init__(self, loader: BytecodeLoader):
         super().__init__(loader)
-        self.debug_cfg = debug_cfg
 
     def _decompile_instructions(self, instructions: List[Instruction],
                                  obj: CodeObject) -> List[Stmt]:
@@ -33,17 +29,13 @@ class CFGDecompiler(Decompiler):
         old_limit = sys.getrecursionlimit()
         sys.setrecursionlimit(max(old_limit, 10000))
         try:
+
             self._analyze_control_flow(instructions)
 
             cfg = build_cfg(instructions)
 
             compute_dominators(cfg)
             compute_postdominators(cfg)
-
-            if self.debug_cfg:
-                print(f"\n--- CFG for {obj.name or '(anonymous)'} ---", file=sys.stderr)
-                print_cfg(cfg, instructions)
-                print("--- End CFG ---\n", file=sys.stderr)
 
             loops = detect_loops(cfg, instructions)
 

@@ -1,9 +1,6 @@
-#!/usr/bin/env python3
-
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Set, Tuple
 from tjs2_decompiler import VM, Instruction
-
 
 @dataclass
 class BasicBlock:
@@ -22,16 +19,15 @@ class BasicBlock:
     ipdom: Optional[int] = None
     pdom_children: List[int] = field(default_factory=list)
 
-
 VIRTUAL_ENTRY_ID = -1
 VIRTUAL_EXIT_ID = -2
-
 
 @dataclass
 class CFG:
     blocks: Dict[int, BasicBlock] = field(default_factory=dict)
     entry_id: int = VIRTUAL_ENTRY_ID
     exit_id: int = VIRTUAL_EXIT_ID
+
     addr_to_block: Dict[int, int] = field(default_factory=dict)
     idx_to_block: Dict[int, int] = field(default_factory=dict)
 
@@ -46,7 +42,6 @@ class CFG:
 
     def block_instructions(self, block: BasicBlock, instructions: List[Instruction]) -> List[Instruction]:
         return instructions[block.start_idx:block.end_idx]
-
 
 def build_cfg(instructions: List[Instruction]) -> CFG:
     if not instructions:
@@ -66,22 +61,27 @@ def build_cfg(instructions: List[Instruction]) -> CFG:
             target_idx = addr_to_idx.get(target_addr)
             if target_idx is not None:
                 leaders.add(target_idx)
+
             if i + 1 < n:
                 leaders.add(i + 1)
 
         elif instr.op in (VM.RET, VM.THROW):
+
             if i + 1 < n:
                 leaders.add(i + 1)
 
         elif instr.op == VM.ENTRY:
+
             catch_addr = instr.addr + instr.operands[0]
             catch_idx = addr_to_idx.get(catch_addr)
             if catch_idx is not None:
                 leaders.add(catch_idx)
+
             if i + 1 < n:
                 leaders.add(i + 1)
 
         elif instr.op in (VM.SETF, VM.SETNF):
+
             if i + 1 < n:
                 leaders.add(i + 1)
 
@@ -89,6 +89,7 @@ def build_cfg(instructions: List[Instruction]) -> CFG:
     cfg = CFG()
 
     for li, leader_idx in enumerate(sorted_leaders):
+
         if li + 1 < len(sorted_leaders):
             end_idx = sorted_leaders[li + 1]
         else:
@@ -127,15 +128,18 @@ def build_cfg(instructions: List[Instruction]) -> CFG:
         last_instr = instructions[block.end_idx - 1]
 
         if block.terminator == 'jmp':
+
             target_addr = last_instr.addr + last_instr.operands[0]
             target_idx = addr_to_idx.get(target_addr)
             if target_idx is not None and target_idx in cfg.blocks:
                 _add_edge(cfg, block.id, target_idx)
 
         elif block.terminator in ('jf', 'jnf'):
+
             if block.end_idx < n and block.end_idx in cfg.blocks:
                 fall_through_id = block.end_idx
                 _add_edge(cfg, block.id, fall_through_id)
+
                 if block.terminator == 'jnf':
                     block.cond_true = fall_through_id
                 else:
@@ -151,6 +155,7 @@ def build_cfg(instructions: List[Instruction]) -> CFG:
                     block.cond_true = target_idx
 
         elif block.terminator == 'entry':
+
             if block.end_idx < n and block.end_idx in cfg.blocks:
                 _add_edge(cfg, block.id, block.end_idx)
 
@@ -160,16 +165,17 @@ def build_cfg(instructions: List[Instruction]) -> CFG:
                 _add_edge(cfg, block.id, catch_idx)
 
         elif block.terminator in ('ret', 'throw'):
+
             pass
 
         elif block.terminator == 'fall':
+
             if block.end_idx < n and block.end_idx in cfg.blocks:
                 _add_edge(cfg, block.id, block.end_idx)
 
     _add_virtual_nodes(cfg)
 
     return cfg
-
 
 def _add_edge(cfg: CFG, from_id: int, to_id: int):
     from_block = cfg.blocks.get(from_id)
@@ -181,8 +187,8 @@ def _add_edge(cfg: CFG, from_id: int, to_id: int):
     if from_id not in to_block.predecessors:
         to_block.predecessors.append(from_id)
 
-
 def _add_virtual_nodes(cfg: CFG):
+
     entry_block = BasicBlock(id=VIRTUAL_ENTRY_ID, start_idx=-1, end_idx=-1)
     cfg.blocks[VIRTUAL_ENTRY_ID] = entry_block
     cfg.entry_id = VIRTUAL_ENTRY_ID
@@ -202,7 +208,6 @@ def _add_virtual_nodes(cfg: CFG):
         if block.id >= 0 and not block.successors:
             _add_edge(cfg, block.id, VIRTUAL_EXIT_ID)
 
-
 def _compute_rpo(cfg: CFG, entry_id: int, get_successors) -> List[int]:
     visited = set()
     post_order = []
@@ -219,7 +224,6 @@ def _compute_rpo(cfg: CFG, entry_id: int, get_successors) -> List[int]:
     dfs(entry_id)
     return list(reversed(post_order))
 
-
 def _intersect(idom: Dict[int, int], rpo_number: Dict[int, int], b1: int, b2: int) -> int:
     finger1 = b1
     finger2 = b2
@@ -233,7 +237,6 @@ def _intersect(idom: Dict[int, int], rpo_number: Dict[int, int], b1: int, b2: in
             if finger2 == idom.get(finger2):
                 break
     return finger1
-
 
 def compute_dominators(cfg: CFG):
     entry_id = cfg.entry_id
@@ -289,7 +292,6 @@ def compute_dominators(cfg: CFG):
             parent = cfg.blocks.get(dom_id)
             if parent:
                 parent.dom_children.append(block_id)
-
 
 def compute_postdominators(cfg: CFG):
     exit_id = cfg.exit_id
@@ -348,7 +350,6 @@ def compute_postdominators(cfg: CFG):
             if parent:
                 parent.pdom_children.append(block_id)
 
-
 def dominates(cfg: CFG, a: int, b: int) -> bool:
     if a == b:
         return True
@@ -365,7 +366,6 @@ def dominates(cfg: CFG, a: int, b: int) -> bool:
             return False
         current = block.idom
     return False
-
 
 def postdominates(cfg: CFG, a: int, b: int) -> bool:
     if a == b:
@@ -384,13 +384,11 @@ def postdominates(cfg: CFG, a: int, b: int) -> bool:
         current = block.ipdom
     return False
 
-
 def get_merge_point(cfg: CFG, block_id: int) -> Optional[int]:
     block = cfg.blocks.get(block_id)
     if block is None:
         return None
     return block.ipdom
-
 
 def get_back_edges(cfg: CFG) -> List[Tuple[int, int]]:
     back_edges = []
@@ -401,7 +399,6 @@ def get_back_edges(cfg: CFG) -> List[Tuple[int, int]]:
             if dominates(cfg, succ_id, block.id):
                 back_edges.append((block.id, succ_id))
     return back_edges
-
 
 def get_natural_loop(cfg: CFG, back_edge: Tuple[int, int]) -> Set[int]:
     tail, header = back_edge
@@ -422,32 +419,3 @@ def get_natural_loop(cfg: CFG, back_edge: Tuple[int, int]) -> Set[int]:
                 worklist.append(pred_id)
 
     return loop_blocks
-
-
-def print_cfg(cfg: CFG, instructions: List[Instruction]):
-    print("=== Control Flow Graph ===")
-    for block in sorted(cfg.blocks.values(), key=lambda b: b.id):
-        if block.id < 0:
-            name = "ENTRY" if block.id == VIRTUAL_ENTRY_ID else "EXIT"
-            print(f"  Block {name}:")
-        else:
-            instrs = instructions[block.start_idx:block.end_idx]
-            first_addr = instrs[0].addr if instrs else '?'
-            last_addr = instrs[-1].addr if instrs else '?'
-            print(f"  Block {block.id} (addr {first_addr}-{last_addr}, "
-                  f"idx {block.start_idx}-{block.end_idx-1}, "
-                  f"term={block.terminator}):")
-
-        succs = [str(s) for s in block.successors]
-        preds = [str(p) for p in block.predecessors]
-        print(f"    successors: [{', '.join(succs)}]")
-        print(f"    predecessors: [{', '.join(preds)}]")
-
-        if block.idom is not None:
-            print(f"    idom: {block.idom}")
-        if block.ipdom is not None:
-            print(f"    ipdom: {block.ipdom}")
-        if block.dom_children:
-            print(f"    dom_children: {block.dom_children}")
-        if block.cond_true is not None or block.cond_false is not None:
-            print(f"    cond_true: {block.cond_true}, cond_false: {block.cond_false}")
