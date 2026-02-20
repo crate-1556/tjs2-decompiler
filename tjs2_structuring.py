@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -1509,7 +1508,6 @@ def _build_switch_region(cfg: CFG, instructions: List[Instruction],
 
         body_entry_addr = _get_block_addr(body_entry)
 
-
         body_blocks = set()
         worklist = [body_entry]
         visited = set()
@@ -2483,7 +2481,6 @@ def _generate_compound_condition_if(region: Region, cfg: CFG, instructions: List
                     break
                 decompiler._translate_instruction(instr, obj)
 
-
     _BODY = 'BODY'
     _ELSE = 'ELSE'
     _NF = 'NF'
@@ -2529,7 +2526,6 @@ def _generate_compound_condition_if(region: Region, cfg: CFG, instructions: List
         else:
             resolved = nf_blk.cond_true
         return resolved if resolved is not None else else_block
-
 
     def _get_effective_cond(idx, subgroup_context=None):
         bid = chain_blocks[idx]
@@ -2581,7 +2577,6 @@ def _generate_compound_condition_if(region: Region, cfg: CFG, instructions: List
         if should_negate:
             return decompiler._negate_expr(cond)
         return cond
-
 
     def _get_effective_jump(idx):
         bid = chain_blocks[idx]
@@ -2769,7 +2764,6 @@ def _generate_compound_condition_if(region: Region, cfg: CFG, instructions: List
 
         rest = _reconstruct_or_subgroup(start + 1, end, parent_context)
         return BinaryExpr(_get_effective_cond(start, 'or'), '||', rest)
-
 
     def _split_or_groups():
         if n <= 1:
@@ -3138,14 +3132,17 @@ def _find_branch_target_reg(cfg: CFG, instructions: List[Instruction],
                 last_was_flag_op = False
             elif op in (VM.SPD, VM.SPDE, VM.SPDEH, VM.SPDS, VM.SPI, VM.SPIE, VM.SPIS):
                 has_side_effects = True
+                target_reg = None
                 new_target_reg = None
                 last_was_flag_op = False
             elif op == VM.SRV:
                 has_side_effects = True
+                target_reg = None
                 new_target_reg = None
                 last_was_flag_op = False
             elif op == VM.RET:
                 has_side_effects = True
+                target_reg = None
                 new_target_reg = None
                 last_was_flag_op = False
             elif op in (VM.CEQ, VM.CDEQ, VM.CLT, VM.CGT):
@@ -3684,3 +3681,4 @@ def _generate_try_catch(region: Region, cfg: CFG, instructions: List[Instruction
 
     try_stmt = TryStmt(try_stmts, catch_var_name, catch_stmts)
     return preamble_stmts + [try_stmt]
+

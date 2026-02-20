@@ -372,4 +372,4 @@ The decompiler has been validated against all TJS2 scripts contained within the 
 - [x] [KAGEX3/system](https://github.com/krkrz/krkr2/tree/master/kirikiri2/branches/kag3ex3/template/system) 
 - [ ] All script files of a complete game / 一部游戏的全部脚本资源 (IN PROGRESS)
 
-**NOTE**: 
+**NOTE**: 已确认前3个dir输出100%无误，将会优化输出格式，并用真实游戏脚本进行测试。

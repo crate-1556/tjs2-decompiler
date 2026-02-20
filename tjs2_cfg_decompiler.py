@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 
 import sys
 from typing import List, Optional
@@ -28,7 +27,6 @@ class CFGDecompiler(Decompiler):
         if not hasattr(self, '_pending_spie'):
             self._reset_state()
 
-        import sys
         old_limit = sys.getrecursionlimit()
         sys.setrecursionlimit(max(old_limit, 10000))
         try:
@@ -56,3 +54,4 @@ class CFGDecompiler(Decompiler):
             return stmts
         finally:
             sys.setrecursionlimit(old_limit)
+

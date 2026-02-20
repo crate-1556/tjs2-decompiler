@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 
 import os
 import struct
@@ -51,7 +50,6 @@ class DataType(IntEnum):
 class ContextType(IntEnum):
     TOP_LEVEL = 0; FUNCTION = 1; EXPR_FUNCTION = 2; PROPERTY = 3
     PROPERTY_SETTER = 4; PROPERTY_GETTER = 5; CLASS = 6; SUPER_CLASS_GETTER = 7
-
 
 BINARY_OP_SYMBOLS = {
     VM.LOR: '||', VM.LAND: '&&', VM.BOR: '|', VM.BXOR: '^', VM.BAND: '&',
@@ -1341,7 +1339,6 @@ class Decompiler:
         if not cp_candidates:
             return
 
-
         _data_idx_at_1 = {VM.CONST, VM.SPD, VM.SPDE, VM.SPDEH, VM.SPDS}
         _data_idx_at_2 = {VM.GPD, VM.GPDS, VM.TYPEOFD, VM.CALLD}
         _count_at_2 = {VM.CALL, VM.NEW}
@@ -1487,7 +1484,6 @@ class Decompiler:
                         loop_cond = cond if instr.op == VM.JF else self._negate_expr(cond)
                         i += 1
                         continue
-
 
                 sc_result = self._try_process_short_circuit(instructions, obj, i, end_idx, addr_to_idx)
                 if sc_result is not None:
@@ -1814,7 +1810,7 @@ class Decompiler:
                 obj2, prop_idx2, local_reg = i1.operands[0], i1.operands[1], i1.operands[2]
                 cp_dest, cp_src = i2.operands[0], i2.operands[1]
 
-                if (obj1 == obj2 and prop_idx1 == prop_idx2 and  # same property
+                if (obj1 == obj2 and prop_idx1 == prop_idx2 and
                     r1 == cp_src and
                     local_reg == cp_dest and
                     local_reg < -2 and r1 > 0):
@@ -1848,7 +1844,7 @@ class Decompiler:
                 cp_dest, cp_src = i2.operands[0], i2.operands[1]
                 obj2, prop_idx2, spd_val = i3.operands[0], i3.operands[1], i3.operands[2]
 
-                if (save_src == cp_dest and                       # same local saved and written
+                if (save_src == cp_dest and
                     save_src < -2 and save_reg > 0 and
                     obj1 == obj2 and prop_idx1 == prop_idx2 and
                     cp_src == r2 and
@@ -1885,7 +1881,7 @@ class Decompiler:
                 spi_obj, spi_idx, spi_val = i3.operands[0], i3.operands[1], i3.operands[2]
                 cp_dest, cp_src = i4.operands[0], i4.operands[1]
 
-                if (obj1 == obj2 and prop1 == prop2 and    # same container
+                if (obj1 == obj2 and prop1 == prop2 and
                     gpi_obj == r1 and spi_obj == r3 and
                     idx_reg == spi_idx and
                     cp_src == r2 and
@@ -2631,10 +2627,8 @@ class Decompiler:
         if case_count < 2:
             return None
 
-
         switch_end_addr = 0
         body_regions = []
-
 
         for i, case_info in enumerate(case_infos):
             jnf_idx = case_info['jnf_idx']
@@ -2699,7 +2693,6 @@ class Decompiler:
                 switch_end_addr = default_or_end_addr
 
         switch_end_idx = addr_to_idx.get(switch_end_addr, end_idx)
-
 
         body_to_cases: Dict[int, List[Dict]] = {}
         for case_info in case_infos:
@@ -3855,7 +3848,6 @@ class Decompiler:
 
         return args
 
-
     @staticmethod
     def _get_def_use_regs(op, operands):
         defs = set()
@@ -4043,7 +4035,6 @@ class Decompiler:
         elif op == VM.REGMEMBER:
             pass
 
-
         return defs, uses
 
     def _analyze_register_splits(self, instructions, cfg, num_args):
@@ -4111,7 +4102,6 @@ class Decompiler:
                     kill[bid][r] = set()
 
         first_real_bid = real_blocks[0].id if real_blocks else None
-
 
         in_defs = {b.id: {} for b in real_blocks}
         out_defs = {b.id: {} for b in real_blocks}
@@ -4512,7 +4502,6 @@ def main():
     if not decompile_file(args.input, args.output, disasm=args.disasm, info=args.info,
                           obj_idx=args.obj):
         sys.exit(1)
-
 
 if __name__ == '__main__':
     main()

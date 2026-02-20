@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Set, Tuple
@@ -21,7 +20,6 @@ class BasicBlock:
 
     ipdom: Optional[int] = None
     pdom_children: List[int] = field(default_factory=list)
-
 
 VIRTUAL_ENTRY_ID = -1
 VIRTUAL_EXIT_ID = -2
@@ -422,3 +420,4 @@ def get_natural_loop(cfg: CFG, back_edge: Tuple[int, int]) -> Set[int]:
                 worklist.append(pred_id)
 
     return loop_blocks
+
