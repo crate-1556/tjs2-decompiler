@@ -2418,6 +2418,14 @@ def _generate_if(region: Region, cfg: CFG, instructions: List[Instruction],
                 break_stmt = then_stmts.pop()
                 result.append(break_stmt)
 
+    if loop_context and not else_stmts:
+        last_instr = instructions[block.end_idx - 1]
+        if last_instr.op in (VM.JF, VM.JNF):
+            jump_target_addr = last_instr.addr + last_instr.operands[0]
+            loop_start_addr, _ = loop_context
+            if jump_target_addr == loop_start_addr:
+                result.append(ContinueStmt())
+
     return result
 
 
@@ -2887,6 +2895,14 @@ def _generate_compound_condition_if(region: Region, cfg: CFG, instructions: List
                 break_stmt = then_stmts.pop()
                 result.append(break_stmt)
 
+    if loop_context and not else_stmts:
+        eb = cfg.get_block(else_block)
+        if eb is not None:
+            false_branch_addr = instructions[eb.start_idx].addr
+            loop_start_addr, _ = loop_context
+            if false_branch_addr == loop_start_addr:
+                result.append(ContinueStmt())
+
     return result
 
 
@@ -3131,6 +3147,24 @@ def _find_branch_target_reg(cfg: CFG, instructions: List[Instruction],
                 new_target_reg = None
                 last_was_flag_op = False
             elif op in (VM.SPD, VM.SPDE, VM.SPDEH, VM.SPDS, VM.SPI, VM.SPIE, VM.SPIS):
+                has_side_effects = True
+                target_reg = None
+                new_target_reg = None
+                last_was_flag_op = False
+            elif op in (VM.INCPD, VM.DECPD, VM.INCPI, VM.DECPI, VM.INCP, VM.DECP):
+                has_side_effects = True
+                target_reg = None
+                new_target_reg = None
+                last_was_flag_op = False
+            elif op in (VM.LORPD, VM.LANDPD, VM.BORPD, VM.BXORPD, VM.BANDPD,
+                        VM.SARPD, VM.SALPD, VM.SRPD,
+                        VM.ADDPD, VM.SUBPD, VM.MODPD, VM.DIVPD, VM.IDIVPD, VM.MULPD,
+                        VM.LORPI, VM.LANDPI, VM.BORPI, VM.BXORPI, VM.BANDPI,
+                        VM.SARPI, VM.SALPI, VM.SRPI,
+                        VM.ADDPI, VM.SUBPI, VM.MODPI, VM.DIVPI, VM.IDIVPI, VM.MULPI,
+                        VM.LORP, VM.LANDP, VM.BORP, VM.BXORP, VM.BANDP,
+                        VM.SARP, VM.SALP, VM.SRP,
+                        VM.ADDP, VM.SUBP, VM.MODP, VM.DIVP, VM.IDIVP, VM.MULP):
                 has_side_effects = True
                 target_reg = None
                 new_target_reg = None
@@ -3646,6 +3680,7 @@ def _generate_try_catch(region: Region, cfg: CFG, instructions: List[Instruction
             dest_reg = first_catch_instr.operands[0]
             src_reg = first_catch_instr.operands[1]
             if src_reg == region.exception_reg and dest_reg < -2:
+                decompiler._current_addr = first_catch_instr.addr
                 catch_var_name = decompiler._get_local_name(dest_reg)
                 has_catch_cp = True
 
