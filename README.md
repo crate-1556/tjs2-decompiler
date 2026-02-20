@@ -217,7 +217,7 @@ this.YesNoDialogWindow = YesNoDialogWindow;
 this.askYesNo = askYesNo incontextof this;
 
 class YesNoDialogWindow {
-    (this.Window incontextof this)();
+    (Window incontextof this)();
     this.yesButton = void;
     this.noButton = void;
     this.result = 0;
@@ -230,73 +230,73 @@ class YesNoDialogWindow {
         if (global.Window.mainWindow !== null && typeof global.Window.mainWindow.cursorPointed != "undefined") {
             this.cursorPointed = global.Window.mainWindow.cursorPointed;
         }
-        this.borderStyle = this.bsDialog;
-        this.innerSunken = 0;
-        this.caption = arg1;
-        this.showScrollBars = 0;
-        this.add(new this.Layer(this, null));
+        borderStyle = bsDialog;
+        innerSunken = 0;
+        caption = arg1;
+        showScrollBars = 0;
+        add(new Layer(this, null));
         if (typeof this.cursorDefault !== "undefined") {
-            this.primaryLayer.cursor = this.cursorDefault;
+            primaryLayer.cursor = cursorDefault;
         }
-        var local0 = this.primaryLayer.font.getTextWidth(arg0);
-        var local1 = this.primaryLayer.font.getTextHeight(arg0);
+        var local0 = primaryLayer.font.getTextWidth(arg0);
+        var local1 = primaryLayer.font.getTextHeight(arg0);
         var local2 = local0 + 40;
         if (local2 < 200) {
             local2 = 200;
         }
         var local3 = local1 * 2 + 60;
-        if (this.kag.fullScreen) {
-            if (this.kag.innerWidth / this.kag.scWidth < this.kag.innerHeight / this.kag.scHeight) {
-                this.setZoom(this.kag.innerWidth, this.kag.scWidth);
+        if (kag.fullScreen) {
+            if (kag.innerWidth / kag.scWidth < kag.innerHeight / kag.scHeight) {
+                setZoom(kag.innerWidth, kag.scWidth);
             } else {
-                this.setZoom(this.kag.innerHeight, this.kag.scHeight);
+                setZoom(kag.innerHeight, kag.scHeight);
             }
         } else {
-            this.setZoom(this.kag.zoomNumer, this.kag.zoomDenom);
+            setZoom(kag.zoomNumer, kag.zoomDenom);
         }
-        this.setInnerSize(local2 * this.zoomNumer / this.zoomDenom, local3 * this.zoomNumer / this.zoomDenom);
-        this.primaryLayer.width = local2;
-        this.primaryLayer.height = local3;
-        this.primaryLayer.colorRect(0, 0, local2, local3, this.clBtnFace, 255);
+        setInnerSize(local2 * zoomNumer / zoomDenom, local3 * zoomNumer / zoomDenom);
+        primaryLayer.width = local2;
+        primaryLayer.height = local3;
+        primaryLayer.colorRect(0, 0, local2, local3, clBtnFace, 255);
         if (global.Window.mainWindow !== null && isvalid global.Window.mainWindow) {
             var local4 = global.Window.mainWindow;
             var local5;
             var local6;
-            local5 = (local4.width - this.width >> 1) + local4.left;
-            local6 = (local4.height - this.height >> 1) + local4.top;
+            local5 = (local4.width - width >> 1) + local4.left;
+            local6 = (local4.height - height >> 1) + local4.top;
             if (local5 < 0) {
                 local5 = 0;
             }
             if (local6 < 0) {
                 local6 = 0;
             }
-            if (local5 + this.width > this.System.screenWidth) {
-                local5 = this.System.screenWidth - this.width;
+            if (local5 + width > System.screenWidth) {
+                local5 = System.screenWidth - width;
             }
-            if (local6 + this.height > this.System.screenHeight) {
-                local6 = this.System.screenHeight - this.height;
+            if (local6 + height > System.screenHeight) {
+                local6 = System.screenHeight - height;
             }
-            this.setPos(local5, local6);
+            setPos(local5, local6);
         } else {
-            this.setPos(this.System.screenWidth - this.width >> 1, this.System.screenHeight - this.height >> 1);
+            setPos(System.screenWidth - width >> 1, System.screenHeight - height >> 1);
         }
-        this.primaryLayer.drawText(local2 - local0 >> 1, 14, arg0, this.clBtnText);
-        this.add(this.yesButton = new this.ButtonLayer(this, this.primaryLayer));
-        this.yesButton.caption = "はい";
-        this.yesButton.captionColor = this.clBtnText;
-        this.yesButton.width = 70;
-        this.yesButton.height = 25;
-        this.yesButton.top = local1 + 35;
-        this.yesButton.left = local2 - 150 >> 1;
-        this.yesButton.visible = 1;
-        this.add(this.noButton = new this.ButtonLayer(this, this.primaryLayer));
-        this.noButton.caption = "いいえ";
-        this.noButton.captionColor = this.clBtnText;
-        this.noButton.width = 70;
-        this.noButton.height = 25;
-        this.noButton.top = local1 + 35;
-        this.noButton.left = (local2 - 150 >> 1) + 70 + 10;
-        this.noButton.visible = 1;
+        primaryLayer.drawText(local2 - local0 >> 1, 14, arg0, clBtnText);
+        add(yesButton = new ButtonLayer(this, primaryLayer));
+        yesButton.caption = "はい";
+        yesButton.captionColor = clBtnText;
+        yesButton.width = 70;
+        yesButton.height = 25;
+        yesButton.top = local1 + 35;
+        yesButton.left = local2 - 150 >> 1;
+        yesButton.visible = 1;
+        add(noButton = new ButtonLayer(this, primaryLayer));
+        noButton.caption = "いいえ";
+        noButton.captionColor = clBtnText;
+        noButton.width = 70;
+        noButton.height = 25;
+        noButton.top = local1 + 35;
+        noButton.left = (local2 - 150 >> 1) + 70 + 10;
+        noButton.visible = 1;
     }
 
     function finalize() {
@@ -305,33 +305,33 @@ class YesNoDialogWindow {
 
     function action(arg0) {
         if (arg0.type == "onClick") {
-            if (arg0.target == this.yesButton) {
-                this.result = 1;
-                this.close();
-            } else if (arg0.target == this.noButton) {
-                this.result = 0;
-                this.close();
+            if (arg0.target == yesButton) {
+                result = 1;
+                close();
+            } else if (arg0.target == noButton) {
+                result = 0;
+                close();
             }
         } else if (arg0.type == "onKeyDown" && arg0.target === this) {
             switch (arg0.key) {
-            case this.VK_PADLEFT:
-                this.yesButton.focus();
+            case VK_PADLEFT:
+                yesButton.focus();
                 break;
-            case this.VK_PADRIGHT:
-                this.noButton.focus();
+            case VK_PADRIGHT:
+                noButton.focus();
                 break;
-            case this.VK_PAD1:
-                if (this.focusedLayer == this.yesButton) {
-                    this.result = 1;
-                    this.close();
-                } else if (this.focusedLayer == this.noButton) {
-                    this.result = 0;
-                    this.close();
+            case VK_PAD1:
+                if (focusedLayer == yesButton) {
+                    result = 1;
+                    close();
+                } else if (focusedLayer == noButton) {
+                    result = 0;
+                    close();
                 }
                 break;
-            case this.VK_PAD2:
-                this.result = 0;
-                this.close();
+            case VK_PAD2:
+                result = 0;
+                close();
                 break;
             }
         }
@@ -339,9 +339,9 @@ class YesNoDialogWindow {
 
     function onKeyDown(arg0, arg1) {
         global.Window.onKeyDown(...);
-        if (arg0 == this.VK_ESCAPE) {
-            this.result = 0;
-            this.close();
+        if (arg0 == VK_ESCAPE) {
+            result = 0;
+            close();
         }
     }
 }
@@ -350,12 +350,13 @@ function askYesNo(arg0, arg1) {
     if (arg1 === void) {
         arg1 = "確認";
     }
-    var local0 = new this.YesNoDialogWindow(arg0, arg1);
+    var local0 = new YesNoDialogWindow(arg0, arg1);
     local0.showModal();
     var local1 = local0.result;
     invalidate(local0);
     return local1;
 }
+
 ```
 
 </details>
@@ -369,6 +370,6 @@ The decompiler has been validated against all TJS2 scripts contained within the 
 - [x] [kag3/system](https://github.com/krkrz/kag3/tree/master/data/system)
 - [x] [Krkr2Compat](https://github.com/krkrz/Krkr2Compat)
 - [x] [KAGEX3/system](https://github.com/krkrz/krkr2/tree/master/kirikiri2/branches/kag3ex3/template/system) 
-- [ ] All script files of a complete game / 一部游戏的全部脚本资源 （PLAN）
+- [ ] All script files of a complete game / 一部游戏的全部脚本资源 (IN PROGRESS)
 
-**NOTE**: 前3个dir还存在少量BUG，以函数为单位目前准确率在99%左右，等待近期下一次更新。
+**NOTE**: 

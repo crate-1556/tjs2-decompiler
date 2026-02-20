@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import sys
 from typing import List, Optional
 
@@ -11,6 +13,7 @@ from tjs2_cfg import (
 from tjs2_structuring import (
     detect_loops, build_region_tree, generate_code
 )
+
 
 class CFGDecompiler(Decompiler):
 
@@ -29,10 +32,11 @@ class CFGDecompiler(Decompiler):
         old_limit = sys.getrecursionlimit()
         sys.setrecursionlimit(max(old_limit, 10000))
         try:
-
             self._analyze_control_flow(instructions)
 
             cfg = build_cfg(instructions)
+
+            self._analyze_register_splits(instructions, cfg, obj.func_decl_arg_count)
 
             compute_dominators(cfg)
             compute_postdominators(cfg)
