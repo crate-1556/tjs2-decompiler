@@ -1,8 +1,6 @@
-
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Set, Tuple
 from tjs2_decompiler import VM, Instruction
-
 
 @dataclass
 class BasicBlock:
@@ -24,7 +22,6 @@ class BasicBlock:
 VIRTUAL_ENTRY_ID = -1
 VIRTUAL_EXIT_ID = -2
 
-
 @dataclass
 class CFG:
     blocks: Dict[int, BasicBlock] = field(default_factory=dict)
@@ -44,7 +41,6 @@ class CFG:
 
     def block_instructions(self, block: BasicBlock, instructions: List[Instruction]) -> List[Instruction]:
         return instructions[block.start_idx:block.end_idx]
-
 
 def build_cfg(instructions: List[Instruction]) -> CFG:
     if not instructions:
@@ -168,7 +164,6 @@ def build_cfg(instructions: List[Instruction]) -> CFG:
 
     return cfg
 
-
 def _add_edge(cfg: CFG, from_id: int, to_id: int):
     from_block = cfg.blocks.get(from_id)
     to_block = cfg.blocks.get(to_id)
@@ -178,7 +173,6 @@ def _add_edge(cfg: CFG, from_id: int, to_id: int):
         from_block.successors.append(to_id)
     if from_id not in to_block.predecessors:
         to_block.predecessors.append(from_id)
-
 
 def _add_virtual_nodes(cfg: CFG):
     entry_block = BasicBlock(id=VIRTUAL_ENTRY_ID, start_idx=-1, end_idx=-1)
@@ -200,7 +194,6 @@ def _add_virtual_nodes(cfg: CFG):
         if block.id >= 0 and not block.successors:
             _add_edge(cfg, block.id, VIRTUAL_EXIT_ID)
 
-
 def _compute_rpo(cfg: CFG, entry_id: int, get_successors) -> List[int]:
     visited = set()
     post_order = []
@@ -217,7 +210,6 @@ def _compute_rpo(cfg: CFG, entry_id: int, get_successors) -> List[int]:
     dfs(entry_id)
     return list(reversed(post_order))
 
-
 def _intersect(idom: Dict[int, int], rpo_number: Dict[int, int], b1: int, b2: int) -> int:
     finger1 = b1
     finger2 = b2
@@ -231,7 +223,6 @@ def _intersect(idom: Dict[int, int], rpo_number: Dict[int, int], b1: int, b2: in
             if finger2 == idom.get(finger2):
                 break
     return finger1
-
 
 def compute_dominators(cfg: CFG):
     entry_id = cfg.entry_id
@@ -287,7 +278,6 @@ def compute_dominators(cfg: CFG):
             parent = cfg.blocks.get(dom_id)
             if parent:
                 parent.dom_children.append(block_id)
-
 
 def compute_postdominators(cfg: CFG):
     exit_id = cfg.exit_id
@@ -346,7 +336,6 @@ def compute_postdominators(cfg: CFG):
             if parent:
                 parent.pdom_children.append(block_id)
 
-
 def dominates(cfg: CFG, a: int, b: int) -> bool:
     if a == b:
         return True
@@ -363,7 +352,6 @@ def dominates(cfg: CFG, a: int, b: int) -> bool:
             return False
         current = block.idom
     return False
-
 
 def postdominates(cfg: CFG, a: int, b: int) -> bool:
     if a == b:
@@ -382,13 +370,11 @@ def postdominates(cfg: CFG, a: int, b: int) -> bool:
         current = block.ipdom
     return False
 
-
 def get_merge_point(cfg: CFG, block_id: int) -> Optional[int]:
     block = cfg.blocks.get(block_id)
     if block is None:
         return None
     return block.ipdom
-
 
 def get_back_edges(cfg: CFG) -> List[Tuple[int, int]]:
     back_edges = []
@@ -399,7 +385,6 @@ def get_back_edges(cfg: CFG) -> List[Tuple[int, int]]:
             if dominates(cfg, succ_id, block.id):
                 back_edges.append((block.id, succ_id))
     return back_edges
-
 
 def get_natural_loop(cfg: CFG, back_edge: Tuple[int, int]) -> Set[int]:
     tail, header = back_edge
@@ -420,4 +405,3 @@ def get_natural_loop(cfg: CFG, back_edge: Tuple[int, int]) -> Set[int]:
                 worklist.append(pred_id)
 
     return loop_blocks
-

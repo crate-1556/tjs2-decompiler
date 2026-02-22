@@ -1,4 +1,3 @@
-
 import sys
 from typing import List, Optional
 
@@ -13,7 +12,6 @@ from tjs2_structuring import (
     detect_loops, build_region_tree, generate_code
 )
 
-
 class CFGDecompiler(Decompiler):
 
     def __init__(self, loader: BytecodeLoader):
@@ -26,6 +24,8 @@ class CFGDecompiler(Decompiler):
 
         if not hasattr(self, '_pending_spie'):
             self._reset_state()
+
+        self._detect_with_blocks(instructions)
 
         old_limit = sys.getrecursionlimit()
         sys.setrecursionlimit(max(old_limit, 10000))
@@ -54,4 +54,3 @@ class CFGDecompiler(Decompiler):
             return stmts
         finally:
             sys.setrecursionlimit(old_limit)
-

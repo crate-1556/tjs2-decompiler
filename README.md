@@ -216,19 +216,18 @@ function askYesNo(message, caption = "確認")
 this.YesNoDialogWindow = YesNoDialogWindow;
 this.askYesNo = askYesNo incontextof this;
 
-class YesNoDialogWindow {
-    (Window incontextof this)();
+class YesNoDialogWindow extends Window {
     this.yesButton = void;
     this.noButton = void;
     this.result = 0;
 
     function YesNoDialogWindow(arg0, arg1) {
-        global.Window.Window();
-        if (global.Window.mainWindow !== null && typeof global.Window.mainWindow.cursorDefault != "undefined") {
-            this.cursorDefault = global.Window.mainWindow.cursorDefault;
+        super.Window();
+        if (super.mainWindow !== null && typeof super.mainWindow.cursorDefault != "undefined") {
+            this.cursorDefault = super.mainWindow.cursorDefault;
         }
-        if (global.Window.mainWindow !== null && typeof global.Window.mainWindow.cursorPointed != "undefined") {
-            this.cursorPointed = global.Window.mainWindow.cursorPointed;
+        if (super.mainWindow !== null && typeof super.mainWindow.cursorPointed != "undefined") {
+            this.cursorPointed = super.mainWindow.cursorPointed;
         }
         borderStyle = bsDialog;
         innerSunken = 0;
@@ -258,8 +257,8 @@ class YesNoDialogWindow {
         primaryLayer.width = local2;
         primaryLayer.height = local3;
         primaryLayer.colorRect(0, 0, local2, local3, clBtnFace, 255);
-        if (global.Window.mainWindow !== null && isvalid global.Window.mainWindow) {
-            var local4 = global.Window.mainWindow;
+        if (super.mainWindow !== null && isvalid super.mainWindow) {
+            var local4 = super.mainWindow;
             var local5;
             var local6;
             local5 = (local4.width - width >> 1) + local4.left;
@@ -281,7 +280,7 @@ class YesNoDialogWindow {
             setPos(System.screenWidth - width >> 1, System.screenHeight - height >> 1);
         }
         primaryLayer.drawText(local2 - local0 >> 1, 14, arg0, clBtnText);
-        add(yesButton = new ButtonLayer(this, primaryLayer));
+        add((yesButton = new ButtonLayer(this, primaryLayer)));
         yesButton.caption = "はい";
         yesButton.captionColor = clBtnText;
         yesButton.width = 70;
@@ -289,7 +288,7 @@ class YesNoDialogWindow {
         yesButton.top = local1 + 35;
         yesButton.left = local2 - 150 >> 1;
         yesButton.visible = 1;
-        add(noButton = new ButtonLayer(this, primaryLayer));
+        add((noButton = new ButtonLayer(this, primaryLayer)));
         noButton.caption = "いいえ";
         noButton.captionColor = clBtnText;
         noButton.width = 70;
@@ -300,7 +299,7 @@ class YesNoDialogWindow {
     }
 
     function finalize() {
-        global.Window.finalize(...);
+        super.finalize(...);
     }
 
     function action(arg0) {
@@ -314,31 +313,31 @@ class YesNoDialogWindow {
             }
         } else if (arg0.type == "onKeyDown" && arg0.target === this) {
             switch (arg0.key) {
-            case VK_PADLEFT:
-                yesButton.focus();
-                break;
-            case VK_PADRIGHT:
-                noButton.focus();
-                break;
-            case VK_PAD1:
-                if (focusedLayer == yesButton) {
-                    result = 1;
-                    close();
-                } else if (focusedLayer == noButton) {
+                case VK_PADLEFT:
+                    yesButton.focus();
+                    break;
+                case VK_PADRIGHT:
+                    noButton.focus();
+                    break;
+                case VK_PAD1:
+                    if (focusedLayer == yesButton) {
+                        result = 1;
+                        close();
+                    } else if (focusedLayer == noButton) {
+                        result = 0;
+                        close();
+                    }
+                    break;
+                case VK_PAD2:
                     result = 0;
                     close();
-                }
-                break;
-            case VK_PAD2:
-                result = 0;
-                close();
-                break;
+                    break;
             }
         }
     }
 
     function onKeyDown(arg0, arg1) {
-        global.Window.onKeyDown(...);
+        super.onKeyDown(...);
         if (arg0 == VK_ESCAPE) {
             result = 0;
             close();
@@ -346,10 +345,7 @@ class YesNoDialogWindow {
     }
 }
 
-function askYesNo(arg0, arg1) {
-    if (arg1 === void) {
-        arg1 = "確認";
-    }
+function askYesNo(arg0, arg1 = "確認") {
     var local0 = new YesNoDialogWindow(arg0, arg1);
     local0.showModal();
     var local1 = local0.result;
@@ -370,6 +366,6 @@ The decompiler has been validated against all TJS2 scripts contained within the 
 - [x] [kag3/system](https://github.com/krkrz/kag3/tree/master/data/system)
 - [x] [Krkr2Compat](https://github.com/krkrz/Krkr2Compat)
 - [x] [KAGEX3/system](https://github.com/krkrz/krkr2/tree/master/kirikiri2/branches/kag3ex3/template/system) 
-- [ ] All script files of a complete game / 一部游戏的全部脚本资源 (IN PROGRESS)
+- [x] All script files of a complete game / 一部游戏的全部脚本资源
 
-**NOTE**: 已确认前3个dir输出100%无误，将会优化输出格式，并用真实游戏脚本进行测试。
+**NOTE**: 已大幅优化输出格式，真实游戏脚本测评准确率约99%（以函数为单位），BUG修复中，视情况可能会再测一部。
