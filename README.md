@@ -25,7 +25,7 @@ python3 tjs2_decompiler.py input.tjs -i
 
 ## Example / 示例
 
-Source: [kag3/YesNoDialog.tjs](https://github.com/krkrz/kag3/blob/master/data/system/YesNoDialog.tjs)
+Source: [kag3/system/YesNoDialog.tjs](https://github.com/krkrz/kag3/blob/master/data/system/YesNoDialog.tjs)
 
 <details>
 <summary> Source Code / 源码</summary>
@@ -368,4 +368,4 @@ The decompiler has been validated against all TJS2 scripts contained within the 
 - [x] [KAGEX3/system](https://github.com/krkrz/krkr2/tree/master/kirikiri2/branches/kag3ex3/template/system) 
 - [x] All script files of a complete game / 一部游戏的全部脚本资源
 
-**NOTE**: 已大幅优化输出格式，真实游戏脚本测评准确率约99%（以函数为单位），BUG修复中，视情况可能会再测一部。
+**NOTE**: 已大幅优化输出格式，包括indentation与syntax，真实游戏脚本测评准确率约99%（以函数为单位），BUG修复中，视情况可能会再测一部。
