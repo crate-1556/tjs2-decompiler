@@ -176,6 +176,10 @@ class GlobalExpr(Expr):
     def to_source(self) -> str:
         return 'global'
 
+class WithDotProxy(Expr):
+    def to_source(self) -> str:
+        return 'global'
+
 @dataclass
 class VoidExpr(Expr):
     def to_source(self) -> str:
@@ -274,6 +278,11 @@ class PropertyExpr(Expr):
                 return self.prop
             return f'this["{self.prop}"]'
 
+        if isinstance(self.obj, WithDotProxy) and isinstance(self.prop, str):
+            if self.prop.isidentifier() and not self.prop.startswith('%'):
+                return f'.{self.prop}'
+            return f'.["{self.prop}"]'
+
         obj_src = self.obj.to_source()
         if isinstance(self.obj, (BinaryExpr, TernaryExpr, InContextOfExpr, AssignExpr, TypeofExpr, UnaryExpr, InstanceofExpr)):
             obj_src = f'({obj_src})'
@@ -320,6 +329,12 @@ class MethodCallExpr(Expr):
                 return f'{self.method}({args_src})'
             return f'this["{self.method}"]({args_src})'
 
+        if isinstance(self.obj, WithDotProxy) and isinstance(self.method, str):
+            args_src = ', '.join(self._fmt_arg(a) for a in self.args)
+            if self.method.isidentifier():
+                return f'.{self.method}({args_src})'
+            return f'.["{self.method}"]({args_src})'
+
         obj_src = self.obj.to_source()
         if isinstance(self.obj, (BinaryExpr, TernaryExpr, InContextOfExpr, AssignExpr, TypeofExpr, UnaryExpr, InstanceofExpr)):
             obj_src = f'({obj_src})'
@@ -353,6 +368,13 @@ class TernaryExpr(Expr):
         if isinstance(self.cond, (BinaryExpr, TernaryExpr)):
             cond_src = f'({cond_src})'
         return f'{cond_src} ? {self.true_val.to_source()} : {self.false_val.to_source()}'
+
+@dataclass
+class CommaExpr(Expr):
+    exprs: List[Expr]
+
+    def to_source(self) -> str:
+        return '(' + ', '.join(e.to_source() for e in self.exprs) + ')'
 
 @dataclass
 class ArrayExpr(Expr):
@@ -605,7 +627,6 @@ class SwitchStmt(Stmt):
         return '\n'.join(lines)
 
 class BytecodeLoader:
-
     def __init__(self, data: bytes):
         self.data = data
         self.pos = 0
@@ -900,7 +921,6 @@ def decode_instructions(code: List[int]) -> List[Instruction]:
     return instructions
 
 class Decompiler:
-
     def __init__(self, loader: BytecodeLoader):
         self.loader = loader
         self.current_obj: Optional[CodeObject] = None
@@ -1134,9 +1154,13 @@ class Decompiler:
         saved_switch_break_stack = list(self._switch_break_stack)
         saved_side_effect_addrs = set(self._side_effect_multi_read_addrs)
         saved_callexpr_temp_cp = set(self._callexpr_temp_cp_addrs) if hasattr(self, '_callexpr_temp_cp_addrs') else set()
+        saved_dead_gpd_addrs = set(self._dead_gpd_addrs)
 
         self._reset_state()
         self.current_obj = obj
+
+        if saved_in_with:
+            self._parent_in_with = True
 
         args = self._build_args(obj)
 
@@ -1186,6 +1210,7 @@ class Decompiler:
         self._switch_break_stack = saved_switch_break_stack
         self._side_effect_multi_read_addrs = saved_side_effect_addrs
         self._callexpr_temp_cp_addrs = saved_callexpr_temp_cp
+        self._dead_gpd_addrs = saved_dead_gpd_addrs
 
         return AnonFuncExpr(args, body)
 
@@ -1304,6 +1329,7 @@ class Decompiler:
         self._prev_instruction = None
         self._with_cp_addrs = set()
         self._in_with = False
+        self._parent_in_with = False
         self._pending_spie = None
         self._pre_stmts = []
         self._current_addr = 0
@@ -1326,7 +1352,9 @@ class Decompiler:
                     cp_candidates.append((i, dest, src, instr.addr))
 
         _data_idx_at_1 = {VM.CONST, VM.SPD, VM.SPDE, VM.SPDEH, VM.SPDS}
-        _data_idx_at_2 = {VM.GPD, VM.GPDS, VM.TYPEOFD, VM.CALLD}
+
+        _data_idx_at_2 = {VM.GPD, VM.GPDS, VM.TYPEOFD, VM.CALLD, VM.DELD}
+
         _count_at_2 = {VM.CALL, VM.NEW}
         _count_at_3 = {VM.CALLI, VM.CALLD}
         _jump_ops = {VM.JF, VM.JNF, VM.JMP, VM.ENTRY, VM.EXTRY, VM.DEBUGGER}
@@ -1340,8 +1368,29 @@ class Decompiler:
             if op in _jump_ops:
                 return set()
 
+            _call_ops_argc2 = {VM.CALL, VM.NEW}
+            _call_ops_argc3 = {VM.CALLD, VM.CALLI}
+            expand_skip_positions = None
+            if op in _call_ops_argc2 and len(ops) > 2 and ops[2] < 0:
+
+                args_start = 3
+                real_argc = ops[args_start] if args_start < len(ops) else 0
+                expand_skip_positions = {args_start}
+                for ei in range(real_argc):
+                    type_pos = args_start + 1 + ei * 2
+                    expand_skip_positions.add(type_pos)
+            elif op in _call_ops_argc3 and len(ops) > 3 and ops[3] < 0:
+                args_start = 4
+                real_argc = ops[args_start] if args_start < len(ops) else 0
+                expand_skip_positions = {args_start}
+                for ei in range(real_argc):
+                    type_pos = args_start + 1 + ei * 2
+                    expand_skip_positions.add(type_pos)
+
             result = set()
             for pos, val in enumerate(ops):
+                if expand_skip_positions and pos in expand_skip_positions:
+                    continue
                 if pos == 1 and op in _data_idx_at_1:
                     continue
                 if pos == 2 and op in _data_idx_at_2:
@@ -1389,6 +1438,18 @@ class Decompiler:
                 if prev.op in (VM.CALL, VM.CALLD, VM.CALLI):
                     if prev.operands and prev.operands[0] == src:
                         prev_is_call = True
+                elif (prev.op in (VM.GPI, VM.GPIS, VM.GPD, VM.GPDS) and
+                      prev.operands and prev.operands[0] == src):
+
+                    prev_read = _get_read_regs(prev)
+                    for k in range(i - 2, max(i - 6, -1), -1):
+                        anc = instructions[k]
+                        if anc.op in (VM.JMP, VM.JF, VM.JNF, VM.RET, VM.THROW):
+                            break
+                        if (anc.op in (VM.CALL, VM.CALLD, VM.CALLI) and
+                                anc.operands and anc.operands[0] in prev_read):
+                            prev_is_call = True
+                            break
             if not prev_is_call:
                 continue
             use_count = 0
@@ -1400,6 +1461,10 @@ class Decompiler:
                 elif nxt.op in (VM.CALLD,):
                     if len(nxt.operands) >= 2 and nxt.operands[1] == dest:
                         use_count += 1
+                elif nxt.op in (VM.SPD, VM.SPDE, VM.SPDEH, VM.SPDS):
+                    if len(nxt.operands) >= 1 and nxt.operands[0] == dest:
+                        use_count += 1
+
                 if nxt.operands and nxt.operands[0] == dest:
                     if nxt.op in (VM.CP, VM.CONST, VM.CL, VM.CCL,
                                   VM.GPD, VM.GPDS, VM.GPI, VM.GPIS,
@@ -1416,12 +1481,17 @@ class Decompiler:
             if dest <= 0:
                 continue
             read_count = 0
+            _container_set_ops = (VM.SPI, VM.SPIS, VM.SPIE)
             for j in range(i + 1, len(instructions)):
                 nxt = instructions[j]
                 if nxt.op in (VM.JMP, VM.JF, VM.JNF, VM.RET, VM.THROW):
                     break
                 read_regs = _get_read_regs(nxt)
                 if dest in read_regs:
+                    if (nxt.op in _container_set_ops and
+                            len(nxt.operands) >= 3 and
+                            nxt.operands[0] == dest and nxt.operands[2] != dest):
+                        continue
                     read_count += 1
                 if nxt.operands and nxt.operands[0] == dest:
                     if nxt.op in (
@@ -1451,9 +1521,18 @@ class Decompiler:
                     if nxt.op in (VM.JMP, VM.JF, VM.JNF, VM.RET, VM.THROW):
                         break
                     if dest in _get_read_regs(nxt):
+
+                        if (nxt.op in _container_set_ops and
+                                len(nxt.operands) >= 3 and
+                                nxt.operands[0] == dest and nxt.operands[2] != dest):
+                            continue
                         if (nxt.op == VM.CP and len(nxt.operands) >= 2 and
                                 nxt.operands[0] < -2 and nxt.operands[1] == dest):
-                            skip = True
+                            if instr.op == VM.NEW:
+                                skip = True
+                            else:
+
+                                first_read_idx = j
                         elif (nxt.op in _named_prop_set_ops and
                               len(nxt.operands) >= 3 and nxt.operands[2] == dest):
                             if instr.op == VM.NEW:
@@ -1465,27 +1544,48 @@ class Decompiler:
                             first_read_idx = j
                         break
                 if first_read_idx is not None and not skip:
+                    first_read_instr = instructions[first_read_idx]
+                    first_read_is_cp_local = (
+                        first_read_instr.op == VM.CP and
+                        len(first_read_instr.operands) >= 2 and
+                        first_read_instr.operands[0] < -2 and
+                        first_read_instr.operands[1] == dest
+                    )
                     for j in range(first_read_idx + 1, len(instructions)):
                         nxt = instructions[j]
                         if nxt.op in (VM.JMP, VM.JF, VM.JNF, VM.RET, VM.THROW):
                             break
                         if dest in _get_read_regs(nxt):
-                            if (nxt.op == VM.CP and len(nxt.operands) >= 2 and
-                                    nxt.operands[0] < -2 and nxt.operands[1] == dest):
-                                skip = True
-                            elif nxt.op in (VM.CALL, VM.CALLD, VM.CALLI):
-                                skip = True
+
+                            if (nxt.op in _container_set_ops and
+                                    len(nxt.operands) >= 3 and
+                                    nxt.operands[0] == dest and nxt.operands[2] != dest):
+                                continue
+                            if first_read_is_cp_local:
+
+                                _cond_cmp_ops = (VM.CEQ, VM.CDEQ, VM.CLT, VM.CGT,
+                                                 VM.TT, VM.TF)
+                                if nxt.op in _cond_cmp_ops:
+                                    skip = True
+                            else:
+
+                                if (nxt.op == VM.CP and len(nxt.operands) >= 2 and
+                                        nxt.operands[0] < -2 and nxt.operands[1] == dest):
+                                    skip = True
+                                elif nxt.op in (VM.CALL, VM.CALLD, VM.CALLI, VM.CHGTHIS):
+                                    skip = True
                             break
                 if not skip:
                     self._side_effect_multi_read_addrs.add(instr.addr)
 
         for i, instr in enumerate(instructions):
-            if instr.op != VM.NEW:
+            if instr.op not in (VM.CALL, VM.CALLD, VM.CALLI, VM.NEW):
                 continue
             dest = instr.operands[0]
             if dest <= 0 or instr.addr in self._side_effect_multi_read_addrs:
                 continue
             has_cp_to_local = False
+            has_spd_value_write = False
             gpd_count = 0
             for j in range(i + 1, len(instructions)):
                 nxt = instructions[j]
@@ -1499,11 +1599,62 @@ class Decompiler:
                 if (nxt.op == VM.CP and len(nxt.operands) >= 2 and
                         nxt.operands[1] == dest and nxt.operands[0] < -2):
                     has_cp_to_local = True
+                if (nxt.op in (VM.SPD, VM.SPDE, VM.SPDEH, VM.SPDS) and
+                        len(nxt.operands) >= 3 and nxt.operands[2] == dest and
+                        nxt.operands[0] < 0):
+
+                    has_spd_value_write = True
                 if (nxt.op in (VM.GPD, VM.GPDS) and len(nxt.operands) >= 2 and
                         nxt.operands[1] == dest):
                     gpd_count += 1
-            if gpd_count >= 4 and not has_cp_to_local:
+
+            threshold = 4 if instr.op == VM.NEW else 2
+            if gpd_count >= threshold and not has_cp_to_local and not has_spd_value_write:
                 self._side_effect_multi_read_addrs.add(instr.addr)
+
+        self._dead_gpd_addrs = set()
+        for i, instr in enumerate(instructions):
+            if instr.op not in (VM.GPD, VM.GPI):
+                continue
+            dest = instr.operands[0]
+            if dest <= 0:
+                continue
+
+            found_read = False
+            found_overwrite = False
+            _OVERWRITE_OPS = frozenset((
+                VM.CP, VM.CONST, VM.CL, VM.CCL, VM.GLOBAL,
+                VM.GPD, VM.GPDS, VM.GPI, VM.GPIS,
+                VM.CALL, VM.CALLD, VM.CALLI, VM.NEW,
+                VM.SETF, VM.SETNF,
+            ))
+            for j in range(i + 1, len(instructions)):
+                nxt = instructions[j]
+                if nxt.op in (VM.JMP, VM.JF, VM.JNF, VM.RET, VM.THROW):
+                    break
+                read_regs = _get_read_regs(nxt)
+                if dest in read_regs:
+                    found_read = True
+                    break
+                if nxt.operands and nxt.operands[0] == dest and nxt.op in _OVERWRITE_OPS:
+                    found_overwrite = True
+                    break
+            if found_read:
+                continue
+            if found_overwrite:
+
+                self._dead_gpd_addrs.add(instr.addr)
+                continue
+
+            globally_read = False
+            for j in range(i + 1, len(instructions)):
+                nxt = instructions[j]
+                read_regs = _get_read_regs(nxt)
+                if dest in read_regs:
+                    globally_read = True
+                    break
+            if not globally_read:
+                self._dead_gpd_addrs.add(instr.addr)
 
     def _decompile_object(self, obj: CodeObject) -> List[Stmt]:
         if not obj.code:
@@ -2758,6 +2909,7 @@ class Decompiler:
                     cond = self._negate_expr(cond)
                 stmt = IfStmt(cond, [ContinueStmt()], [])
                 return {'stmt': stmt, 'next_idx': cond_idx + 1}
+
             return None
 
         logical_result = self._try_detect_logical_expr(instructions, obj, cond_idx, end_idx, addr_to_idx)
@@ -3656,7 +3808,10 @@ class Decompiler:
             return None
 
         if op == VM.GLOBAL:
-            set_reg(ops[0], GlobalExpr())
+            if self._parent_in_with:
+                set_reg(ops[0], WithDotProxy())
+            else:
+                set_reg(ops[0], GlobalExpr())
             return None
 
         if op == VM.TT:
@@ -3923,6 +4078,9 @@ class Decompiler:
             if op == VM.GPDS:
                 prop_expr = UnaryExpr('&', prop_expr)
             set_reg(r1, prop_expr)
+
+            if instr.addr in self._dead_gpd_addrs:
+                return ExprStmt(prop_expr)
             return None
 
         if op in (VM.GPI, VM.GPIS):
@@ -3950,8 +4108,11 @@ class Decompiler:
                 isinstance(value, (DictExpr, ArrayExpr)) or
                 (isinstance(value, CallExpr) and value.is_new)
             ):
+                deferred_target = target
+                if op == VM.SPDS and r1 != -1:
+                    deferred_target = UnaryExpr('&', target)
                 self._pending_spie = {
-                    'target': target,
+                    'target': deferred_target,
                     'value': value,
                     'value_reg': r3,
                 }
@@ -4066,17 +4227,6 @@ class Decompiler:
             args = self._parse_call_args(ops, 3, argc)
             result = CallExpr(ctor, args, is_new=True)
 
-            if argc == 0 and isinstance(ctor, PropertyExpr):
-                ctor_name = ctor.prop if isinstance(ctor.prop, str) else None
-                if ctor_name == 'Dictionary':
-                    self.pending_dicts[r1] = []
-                    set_reg(r1, result)
-                    return None
-                elif ctor_name == 'Array':
-                    self.pending_arrays[r1] = []
-                    set_reg(r1, result)
-                    return None
-
             if instr.addr in self._side_effect_multi_read_addrs:
                 skip = False
                 if argc == 0 and isinstance(ctor, PropertyExpr):
@@ -4088,6 +4238,19 @@ class Decompiler:
                     set_reg(r1, VarExpr(name))
                     self.declared_vars.add(name)
                     return VarDeclStmt(name, result)
+
+            if argc == 0 and isinstance(ctor, PropertyExpr):
+                ctor_name = ctor.prop if isinstance(ctor.prop, str) else None
+                if ctor_name == 'Dictionary':
+
+                    self.pending_dicts[r1] = []
+                    set_reg(r1, result)
+                    return None
+                elif ctor_name == 'Array':
+
+                    self.pending_arrays[r1] = []
+                    set_reg(r1, result)
+                    return None
 
             set_reg(r1, result)
             return None
@@ -4197,9 +4360,21 @@ class Decompiler:
     def _parse_call_args(self, ops: List[int], start_idx: int, argc: int) -> List[Expr]:
         args = []
 
-        def get_arg_expr(reg: int) -> Expr:
+        def get_arg_expr(reg: int, arg_pos: int = -1) -> Expr:
             if reg == 0:
-                return OmittedArgExpr()
+
+                has_later_real_arg = False
+                if arg_pos >= 0 and argc > 0:
+                    for k in range(arg_pos + 1, argc):
+                        later_idx = start_idx + k
+                        if later_idx < len(ops) and ops[later_idx] != 0:
+                            has_later_real_arg = True
+                            break
+                if has_later_real_arg:
+                    return OmittedArgExpr()
+                else:
+                    return VoidExpr()
+
             if reg == -1:
                 return ThisExpr()
             if reg == -2:
@@ -4239,7 +4414,7 @@ class Decompiler:
             for i in range(argc):
                 if start_idx + i < len(ops):
                     arg_reg = ops[start_idx + i]
-                    args.append(get_arg_expr(arg_reg))
+                    args.append(get_arg_expr(arg_reg, i))
 
         return args
 
@@ -4482,6 +4657,24 @@ class Decompiler:
         param_min = -(2 + num_args)
         multi_def_regs = {r for r, addrs in all_defs.items()
                           if len(addrs) >= 2 and r < param_min}
+        if not multi_def_regs:
+            return
+
+        cl_count = defaultdict(int)
+        for block in real_blocks:
+            for instr in instructions[block.start_idx:block.end_idx]:
+                if instr.op == VM.CL and len(instr.operands) >= 1:
+                    r = instr.operands[0]
+                    if r in multi_def_regs:
+                        cl_count[r] += 1
+                elif instr.op == VM.CCL and len(instr.operands) >= 2:
+                    start_reg = instr.operands[0]
+                    count = instr.operands[1]
+                    for i in range(count):
+                        r = start_reg + i
+                        if r in multi_def_regs:
+                            cl_count[r] += 1
+        multi_def_regs = {r for r in multi_def_regs if cl_count.get(r, 0) >= 2}
         if not multi_def_regs:
             return
 
