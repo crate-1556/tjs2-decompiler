@@ -213,7 +213,7 @@ function askYesNo(message, caption = "確認")
 <summary>Decompiled Output / 反编译输出</summary>
 
 ```javascript
-tthis.YesNoDialogWindow = YesNoDialogWindow;
+this.YesNoDialogWindow = YesNoDialogWindow;
 this.askYesNo = askYesNo incontextof this;
 
 class YesNoDialogWindow extends Window {
