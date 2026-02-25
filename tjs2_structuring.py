@@ -300,6 +300,54 @@ def _classify_loop(cfg: CFG, instructions: List[Instruction],
                         if block_id == header:
                             return 'while', header
 
+        if header_block.terminator in ('jf', 'jnf'):
+            _NO_SIDE_EFFECT_OPS = frozenset({
+                VM.CONST, VM.CP, VM.CL, VM.CCL,
+                VM.CEQ, VM.CDEQ, VM.CLT, VM.CGT, VM.SETF, VM.SETNF,
+                VM.TT, VM.TF, VM.NF,
+                VM.JF, VM.JNF, VM.JMP,
+                VM.CALLD, VM.CALLI, VM.CALL,
+                VM.GPD, VM.GPDS, VM.GPI, VM.GPIS,
+                VM.ADD, VM.SUB, VM.MUL, VM.DIV,
+                VM.TYPEOF, VM.TYPEOFD, VM.TYPEOFI,
+                VM.CHKINS,
+            })
+            visited_chain = set()
+            chain_queue = [header]
+            has_exit = False
+            all_pure = True
+            while chain_queue and all_pure:
+                bid = chain_queue.pop(0)
+                if bid in visited_chain:
+                    continue
+                visited_chain.add(bid)
+                blk = cfg.get_block(bid)
+                if blk is None or bid not in body:
+                    continue
+                if blk.terminator not in ('jf', 'jnf'):
+                    continue
+                for idx in range(blk.start_idx, blk.end_idx):
+                    if idx >= len(instructions):
+                        break
+                    instr = instructions[idx]
+                    if instr.op not in _NO_SIDE_EFFECT_OPS:
+                        all_pure = False
+                        break
+                    if instr.op in (VM.CALLD, VM.CALLI, VM.CALL):
+                        res_reg = instr.operands[0] if instr.operands else 0
+                        if res_reg == 0 or res_reg < -2:
+                            all_pure = False
+                            break
+                if not all_pure:
+                    break
+                for succ_id in blk.successors:
+                    if succ_id not in body and succ_id >= 0:
+                        has_exit = True
+                    elif succ_id in body and succ_id not in visited_chain:
+                        chain_queue.append(succ_id)
+            if all_pure and has_exit:
+                return 'while', header
+
     return 'infinite', None
 
 def _is_switch_back_jump(cfg: CFG, instructions: List[Instruction],
@@ -516,7 +564,50 @@ def _detect_condition_chain(cfg: CFG, start_block_id: int, instructions: List[In
                                                   VM.JF, VM.JNF, VM.JMP)):
                         break
                 if not is_assign_in_cond:
+                    for j2 in range(idx + 1, block.end_idx):
+                        i2 = instructions[j2]
+                        if (i2.op in (VM.CALLD, VM.CALLI)
+                                and len(i2.operands) >= 2
+                                and i2.operands[1] == src_reg):
+                            derived = i2.operands[0]
+                            for k2 in range(j2 + 1, block.end_idx):
+                                i3 = instructions[k2]
+                                if i3.op in (VM.CDEQ, VM.CEQ, VM.CLT, VM.CGT):
+                                    if i3.operands[0] == derived:
+                                        is_assign_in_cond = True
+                                    break
+                                if i3.op in (VM.JF, VM.JNF):
+                                    break
+                            break
+                        if (i2.operands and i2.operands[0] == src_reg
+                                and i2.op not in (VM.CDEQ, VM.CEQ, VM.CLT, VM.CGT,
+                                                  VM.TT, VM.TF, VM.NF,
+                                                  VM.JF, VM.JNF, VM.JMP)):
+                            break
+                        if i2.op in (VM.JF, VM.JNF):
+                            break
+                if not is_assign_in_cond:
                     return False
+            if instr.op in (VM.INC, VM.DEC) and len(instr.operands) >= 1:
+                target_reg = instr.operands[0]
+                if target_reg < -2:
+                    is_postfix = (idx > block.start_idx
+                                  and instructions[idx - 1].op == VM.CP
+                                  and len(instructions[idx - 1].operands) >= 2
+                                  and instructions[idx - 1].operands[1] == target_reg
+                                  and instructions[idx - 1].operands[0] >= 0)
+                    if not is_postfix:
+                        used_in_cmp = False
+                        for j in range(idx + 1, block.end_idx):
+                            later = instructions[j]
+                            if later.op in (VM.CDEQ, VM.CEQ, VM.CLT, VM.CGT):
+                                if target_reg in later.operands:
+                                    used_in_cmp = True
+                                break
+                            if later.op in (VM.JF, VM.JNF, VM.JMP):
+                                break
+                        if not used_in_cmp:
+                            return False
         return True
 
     def _try_collect_nf_and_continue(block):
@@ -824,7 +915,8 @@ def _build_region_recursive(cfg: CFG, instructions: List[Instruction],
                              loop_by_header: Dict[int, LoopInfo],
                              processed: Set[int],
                              containing_loop: Optional[LoopInfo],
-                             loop_blocks: Set[int]) -> Region:
+                             loop_blocks: Set[int],
+                             switch_exit_addr: Optional[int] = None) -> Region:
     children = []
     all_blocks = set()
     current = entry_block_id
@@ -966,6 +1058,12 @@ def _build_region_recursive(cfg: CFG, instructions: List[Instruction],
         elif block.terminator == 'jmp' and block.successors:
             target = block.successors[0]
             if valid_blocks is not None and target not in valid_blocks:
+                if switch_exit_addr is not None:
+                    jmp_instr = instructions[block.end_idx - 1]
+                    if jmp_instr.op == VM.JMP:
+                        jmp_target_addr = jmp_instr.addr + jmp_instr.operands[0]
+                        if jmp_target_addr >= switch_exit_addr:
+                            simple_region._switch_break_exit = True
                 current = None
             else:
                 current = target
@@ -987,7 +1085,8 @@ def _build_region_recursive(cfg: CFG, instructions: List[Instruction],
 def _build_loop_region(cfg: CFG, instructions: List[Instruction],
                         loop_info: LoopInfo,
                         loop_by_header: Dict[int, LoopInfo],
-                        processed: Set[int]) -> Region:
+                        processed: Set[int],
+                        switch_exit_addr: Optional[int] = None) -> Region:
     header = loop_info.header
     body_blocks = loop_info.body_blocks
 
@@ -1038,7 +1137,8 @@ def _build_loop_region(cfg: CFG, instructions: List[Instruction],
 
         body_region = _build_region_recursive(
             cfg, instructions, body_entry, loop_by_header, body_processed,
-            loop_info, body_blocks_for_recursive
+            loop_info, body_blocks_for_recursive,
+            switch_exit_addr=switch_exit_addr
         )
 
         if saved_loop_entry is not None:
@@ -1088,7 +1188,8 @@ def _build_if_region(cfg: CFG, instructions: List[Instruction],
                       loop_by_header: Dict[int, LoopInfo],
                       processed: Set[int],
                       containing_loop: Optional[LoopInfo],
-                      loop_blocks: Set[int]) -> Region:
+                      loop_blocks: Set[int],
+                      switch_exit_addr: Optional[int] = None) -> Region:
     block = cfg.get_block(cond_block_id)
     processed.add(cond_block_id)
 
@@ -1139,7 +1240,8 @@ def _build_if_region(cfg: CFG, instructions: List[Instruction],
             then_processed.discard(b)
         then_region = _build_region_recursive(
             cfg, instructions, then_entry, loop_by_header, then_processed,
-            containing_loop, then_blocks
+            containing_loop, then_blocks,
+            switch_exit_addr=switch_exit_addr
         )
         all_blocks.update(then_blocks)
         for b in then_blocks:
@@ -1152,7 +1254,8 @@ def _build_if_region(cfg: CFG, instructions: List[Instruction],
             else_processed.discard(b)
         else_region = _build_region_recursive(
             cfg, instructions, else_entry, loop_by_header, else_processed,
-            containing_loop, else_blocks
+            containing_loop, else_blocks,
+            switch_exit_addr=switch_exit_addr
         )
         all_blocks.update(else_blocks)
         for b in else_blocks:
@@ -1180,7 +1283,8 @@ def _build_condition_chain_if_region(cfg: CFG, instructions: List[Instruction],
                                       processed: Set[int],
                                       containing_loop: Optional[LoopInfo],
                                       loop_blocks: Set[int],
-                                      nf_block_ids: Optional[set] = None) -> Region:
+                                      nf_block_ids: Optional[set] = None,
+                                      switch_exit_addr: Optional[int] = None) -> Region:
     if nf_block_ids is None:
         nf_block_ids = set()
 
@@ -1226,7 +1330,8 @@ def _build_condition_chain_if_region(cfg: CFG, instructions: List[Instruction],
             then_processed.discard(b)
         then_region = _build_region_recursive(
             cfg, instructions, body_block, loop_by_header, then_processed,
-            containing_loop, then_blocks
+            containing_loop, then_blocks,
+            switch_exit_addr=switch_exit_addr
         )
         all_blocks.update(then_blocks)
         for b in then_blocks:
@@ -1239,7 +1344,8 @@ def _build_condition_chain_if_region(cfg: CFG, instructions: List[Instruction],
             else_processed.discard(b)
         else_region = _build_region_recursive(
             cfg, instructions, else_block, loop_by_header, else_processed,
-            containing_loop, else_blocks
+            containing_loop, else_blocks,
+            switch_exit_addr=switch_exit_addr
         )
         all_blocks.update(else_blocks)
         for b in else_blocks:
@@ -1347,7 +1453,6 @@ def _find_switch_end(cfg: CFG, instructions: List[Instruction],
             target_addr = jmp_instr.addr + jmp_instr.operands[0]
             if target_addr > last_case_end_addr and target_addr not in case_body_entry_addrs:
                 break_targets[target_addr] = break_targets.get(target_addr, 0) + 1
-
     exit_end_addr = None
     exit_switch_bid = None
     backward_jmp_bid = None
@@ -1356,7 +1461,6 @@ def _find_switch_end(cfg: CFG, instructions: List[Instruction],
         if (default_or_end_addr is not None and
                 default_or_end_addr in break_targets and
                 any(t > default_or_end_addr for t in break_targets)):
-
             exit_code_count = 0
             if scan_end_idx is not None:
                 idx = scan_end_idx - 1
@@ -1376,13 +1480,21 @@ def _find_switch_end(cfg: CFG, instructions: List[Instruction],
                     exit_code_count += 1
                     idx -= 1
             larger_targets = [t for t in break_targets if t > default_or_end_addr]
-
-            is_tail_padding = (exit_code_count >= 3
-                               and loop_update_addr is not None
+            is_tail_padding = (loop_update_addr is not None
                                and all(t == loop_update_addr for t in larger_targets))
             if not is_tail_padding:
                 del break_targets[default_or_end_addr]
-        exit_end_addr = max(break_targets, key=lambda t: (break_targets[t], -t))
+        exit_end_addr = max(break_targets, key=lambda t: (break_targets[t], t))
+
+        if (exit_end_addr == loop_update_addr
+                and loop_update_addr is not None
+                and default_or_end_addr is not None
+                and default_or_end_addr != loop_update_addr):
+            bridge_candidates = {t: c for t, c in break_targets.items()
+                                 if default_or_end_addr < t < loop_update_addr}
+            if bridge_candidates:
+                exit_end_addr = max(bridge_candidates,
+                                    key=lambda t: (bridge_candidates[t], -t))
 
         if exit_end_addr == default_or_end_addr:
             forward_count = break_targets.get(exit_end_addr, 0)
@@ -1497,7 +1609,8 @@ def _build_switch_region(cfg: CFG, instructions: List[Instruction],
                           loop_by_header: Dict[int, LoopInfo],
                           processed: Set[int],
                           containing_loop: Optional[LoopInfo],
-                          loop_blocks: Set[int]) -> Region:
+                          loop_blocks: Set[int],
+                          switch_exit_addr: Optional[int] = None) -> Region:
     case_blocks = switch_info['case_blocks']
     ref_reg = switch_info['ref_reg']
     default_or_end = switch_info.get('default_or_end')
@@ -1560,6 +1673,9 @@ def _build_switch_region(cfg: CFG, instructions: List[Instruction],
                 body_entry_addr_set.add(be_addr)
                 body_entry_addr_to_bid[be_addr] = be_bid
 
+    if default_body_block is not None:
+        body_entry_set.add(default_body_block)
+
     first_case_block = cfg.get_block(first_case)
     switch_start_addr = instructions[first_case_block.start_idx].addr if first_case_block else 0
     if default_body_addr is not None and default_body_addr >= switch_start_addr:
@@ -1607,6 +1723,9 @@ def _build_switch_region(cfg: CFG, instructions: List[Instruction],
             if bid == exit_switch_bid:
                 continue
             if bid == backward_jmp_bid:
+                continue
+            if bid_addr is not None and bid_addr < switch_start_addr:
+                has_continue = True
                 continue
             if bid in body_entry_set and bid != body_entry:
                 falls_through = True
@@ -1660,7 +1779,8 @@ def _build_switch_region(cfg: CFG, instructions: List[Instruction],
                 body_processed.discard(bid)
             body_region = _build_region_recursive(
                 cfg, instructions, body_entry, loop_by_header, body_processed,
-                containing_loop, body_blocks
+                containing_loop, body_blocks,
+                switch_exit_addr=exit_end_addr
             )
 
         body_only_jmp = True
@@ -1781,7 +1901,8 @@ def _build_switch_region(cfg: CFG, instructions: List[Instruction],
                         body_processed.discard(bid)
                     default_region = _build_region_recursive(
                         cfg, instructions, default_body_block, loop_by_header, body_processed,
-                        containing_loop, default_blocks
+                        containing_loop, default_blocks,
+                        switch_exit_addr=exit_end_addr
                     )
 
                 switch_cases.append(SwitchCase(
@@ -1814,7 +1935,8 @@ def _build_try_region(cfg: CFG, instructions: List[Instruction],
                        loop_by_header: Dict[int, LoopInfo],
                        processed: Set[int],
                        containing_loop: Optional[LoopInfo],
-                       loop_blocks: Set[int]) -> Region:
+                       loop_blocks: Set[int],
+                       switch_exit_addr: Optional[int] = None) -> Region:
     entry_block_id = try_info['entry_block']
     try_body_start = try_info['try_body_start']
     catch_block_id = try_info['catch_block']
@@ -1876,7 +1998,8 @@ def _build_try_region(cfg: CFG, instructions: List[Instruction],
             try_sub_processed.discard(b)
         try_region = _build_region_recursive(
             cfg, instructions, try_body_start, loop_by_header, try_sub_processed,
-            containing_loop, try_blocks
+            containing_loop, try_blocks,
+            switch_exit_addr=switch_exit_addr
         )
 
     catch_region = None
@@ -1886,7 +2009,8 @@ def _build_try_region(cfg: CFG, instructions: List[Instruction],
             catch_sub_processed.discard(b)
         catch_region = _build_region_recursive(
             cfg, instructions, catch_block_id, loop_by_header, catch_sub_processed,
-            containing_loop, catch_blocks
+            containing_loop, catch_blocks,
+            switch_exit_addr=switch_exit_addr
         )
 
     return Region(
@@ -1905,6 +2029,9 @@ def generate_code(region: Region, cfg: CFG, instructions: List[Instruction],
                   loop_context: Optional[Tuple[int, int, int]] = None,
                   is_top_level: bool = False) -> List[Stmt]:
     if region.type == RegionType.BLOCK:
+        if (decompiler._for_loop_skip_tail_bid is not None
+                and region.header_block == decompiler._for_loop_skip_tail_bid):
+            return []
         return _generate_block(region, cfg, instructions, decompiler, obj, loop_context)
     elif region.type == RegionType.SEQUENCE:
         return _generate_sequence(region, cfg, instructions, decompiler, obj, loop_context)
@@ -2333,6 +2460,7 @@ def _generate_block(region: Region, cfg: CFG, instructions: List[Instruction],
 
     stmts = []
     i = block.start_idx
+    jmp_handled = False
 
     while i < block.end_idx:
         instr = instructions[i]
@@ -2351,6 +2479,7 @@ def _generate_block(region: Region, cfg: CFG, instructions: List[Instruction],
                         stmts.append(flushed)
                     decompiler._collect_pre_stmts(stmts)
                     stmts.append(ContinueStmt())
+                    jmp_handled = True
                     i += 1
                     continue
                 elif target >= loop_exit_addr:
@@ -2359,6 +2488,7 @@ def _generate_block(region: Region, cfg: CFG, instructions: List[Instruction],
                         stmts.append(flushed)
                     decompiler._collect_pre_stmts(stmts)
                     stmts.append(BreakStmt())
+                    jmp_handled = True
                     i += 1
                     continue
             i += 1
@@ -2384,6 +2514,34 @@ def _generate_block(region: Region, cfg: CFG, instructions: List[Instruction],
     if flushed:
         stmts.append(flushed)
 
+    if getattr(region, '_switch_break_exit', False) and not jmp_handled:
+        decompiler._collect_pre_stmts(stmts)
+        stmts.append(BreakStmt())
+
+    return stmts
+
+def _generate_block_for_update(block, instructions, decompiler, obj):
+    stmts = []
+    i = block.start_idx
+    while i < block.end_idx:
+        instr = instructions[i]
+        if instr.op in (VM.JF, VM.JNF, VM.EXTRY):
+            i += 1
+            continue
+        if instr.op == VM.JMP:
+            i += 1
+            continue
+        if instr.op == VM.ENTRY:
+            i += 1
+            continue
+        stmt = decompiler._translate_instruction(instr, obj)
+        decompiler._collect_pre_stmts(stmts)
+        if stmt:
+            stmts.append(stmt)
+        i += 1
+    flushed = decompiler._flush_pending_spie()
+    if flushed:
+        stmts.append(flushed)
     return stmts
 
 def _generate_sequence(region: Region, cfg: CFG, instructions: List[Instruction],
@@ -2437,6 +2595,8 @@ def _expr_contains_var(expr, var_name: str) -> bool:
                 or _expr_contains_var(expr.false_val, var_name))
     if isinstance(expr, PropertyExpr):
         return _expr_contains_var(expr.obj, var_name)
+    if isinstance(expr, CommaExpr):
+        return any(_expr_contains_var(e, var_name) for e in expr.exprs)
     return False
 
 def _is_matching_for_init(prev_stmt: Stmt, for_stmt: ForStmt) -> bool:
@@ -2724,8 +2884,8 @@ def _generate_if(region: Region, cfg: CFG, instructions: List[Instruction],
         last_instr = instructions[block.end_idx - 1]
         if last_instr.op in (VM.JF, VM.JNF):
             false_branch_addr = last_instr.addr + last_instr.operands[0]
-            _, loop_exit_addr, _ = loop_context
-            if false_branch_addr >= loop_exit_addr:
+            _, loop_exit_addr, continue_target = loop_context
+            if false_branch_addr >= loop_exit_addr and false_branch_addr != continue_target:
                 if not isinstance(then_stmts[-1], BreakStmt):
                     else_stmts = [BreakStmt()]
 
@@ -2777,7 +2937,6 @@ def _generate_if(region: Region, cfg: CFG, instructions: List[Instruction],
                     and instructions[ft_block.start_idx].op == VM.SRV
                     and instructions[ft_block.start_idx].operands[0] == 0
                     and instructions[ft_block.start_idx + 1].op == VM.RET):
-
                 ft_end_addr = instructions[ft_block.end_idx - 1].addr
                 jf_instr = instructions[block.end_idx - 1]
                 jf_target = jf_instr.addr + jf_instr.operands[0]
@@ -2796,8 +2955,8 @@ def _generate_if(region: Region, cfg: CFG, instructions: List[Instruction],
         last_instr = instructions[block.end_idx - 1]
         if last_instr.op in (VM.JF, VM.JNF):
             false_branch_addr = last_instr.addr + last_instr.operands[0]
-            _, loop_exit_addr, _ = loop_context
-            if false_branch_addr >= loop_exit_addr:
+            _, loop_exit_addr, continue_target = loop_context
+            if false_branch_addr >= loop_exit_addr and false_branch_addr != continue_target:
                 break_stmt = then_stmts.pop()
                 result.append(break_stmt)
 
@@ -2811,9 +2970,10 @@ def _generate_if(region: Region, cfg: CFG, instructions: List[Instruction],
 
     return result
 
-def _generate_compound_condition_if(region: Region, cfg: CFG, instructions: List[Instruction],
+def _generate_compound_condition_if(region, cfg: CFG, instructions: List[Instruction],
                                      decompiler: 'Decompiler', obj: CodeObject,
-                                     loop_context: Optional[Tuple[int, int, int]]) -> List[Stmt]:
+                                     loop_context: Optional[Tuple[int, int, int]],
+                                     return_condition_only: bool = False):
     chain_blocks_full = region._condition_chain
     body_block = region._chain_body_block
     else_block = region._chain_else_block
@@ -2917,11 +3077,20 @@ def _generate_compound_condition_if(region: Region, cfg: CFG, instructions: List
             resolved = nf_blk.cond_true
         return resolved if resolved is not None else else_block
 
-    def _get_effective_cond(idx, subgroup_context=None, in_structural_not=False):
+    def _get_effective_cond(idx, subgroup_context=None, in_structural_not=False,
+                            subgroup_end=None):
         bid = chain_blocks[idx]
         blk = cfg.get_block(bid)
         cond = conditions[idx]
         cls, raw_target = _classify_jump(bid)
+
+        if cls == _CHAIN and subgroup_end is not None and raw_target in chain_pos:
+            target_p = chain_pos[raw_target]
+            if target_p > subgroup_end:
+                is_jf = (blk.terminator == 'jf')
+                if (subgroup_context == 'and' and is_jf) or \
+                   (subgroup_context == 'or' and not is_jf):
+                    return cond
 
         if cls == _FALL_NF:
             effective = _resolve_nf('jf', raw_target)
@@ -2934,7 +3103,6 @@ def _generate_compound_condition_if(region: Region, cfg: CFG, instructions: List
                     should_negate = True
             else:
                 if in_structural_not:
-
                     should_negate = False
                 else:
                     is_to_body = (effective == body_block or effective == resolved_body)
@@ -3067,6 +3235,18 @@ def _generate_compound_condition_if(region: Region, cfg: CFG, instructions: List
                 rest = _reconstruct(start + 1, end)
                 return BinaryExpr(_get_effective_cond(start), '&&', rest)
 
+            expanded = True
+            while expanded:
+                expanded = False
+                for si in range(start + 1, target_pos):
+                    sj = _get_effective_jump(si)
+                    if sj is not None and sj in chain_pos:
+                        sp = chain_pos[sj]
+                        if target_pos < sp < end:
+                            target_pos = sp
+                            expanded = True
+                            break
+
             structural_not = _is_structural_not_subgroup(start, target_pos)
             use_and_subgroup = _determine_subgroup_type(start, target_pos)
             if structural_not:
@@ -3094,7 +3274,8 @@ def _generate_compound_condition_if(region: Region, cfg: CFG, instructions: List
             return ConstExpr(True)
         if start == end - 1:
             ctx = parent_context if parent_context is not None else 'and'
-            return _get_effective_cond(start, ctx, in_structural_not=_sn)
+            return _get_effective_cond(start, ctx, in_structural_not=_sn,
+                                       subgroup_end=end)
 
         jump = _get_effective_jump(start)
 
@@ -3121,14 +3302,16 @@ def _generate_compound_condition_if(region: Region, cfg: CFG, instructions: List
                     return BinaryExpr(inner, '&&', rest)
 
         rest = _reconstruct_and_subgroup(start + 1, end, parent_context, _sn=_sn)
-        return BinaryExpr(_get_effective_cond(start, 'and', in_structural_not=_sn), '&&', rest)
+        return BinaryExpr(_get_effective_cond(start, 'and', in_structural_not=_sn,
+                                              subgroup_end=end), '&&', rest)
 
     def _reconstruct_or_subgroup(start, end, parent_context=None, _sn=False):
         if start >= end:
             return ConstExpr(True)
         if start == end - 1:
             ctx = parent_context if parent_context is not None else 'or'
-            return _get_effective_cond(start, ctx, in_structural_not=_sn)
+            return _get_effective_cond(start, ctx, in_structural_not=_sn,
+                                       subgroup_end=end)
 
         jump = _get_effective_jump(start)
 
@@ -3155,7 +3338,8 @@ def _generate_compound_condition_if(region: Region, cfg: CFG, instructions: List
                     return BinaryExpr(inner, '&&', rest)
 
         rest = _reconstruct_or_subgroup(start + 1, end, parent_context, _sn=_sn)
-        return BinaryExpr(_get_effective_cond(start, 'or', in_structural_not=_sn), '||', rest)
+        return BinaryExpr(_get_effective_cond(start, 'or', in_structural_not=_sn,
+                                              subgroup_end=end), '||', rest)
 
     def _split_or_groups():
         if n <= 1:
@@ -3232,7 +3416,6 @@ def _generate_compound_condition_if(region: Region, cfg: CFG, instructions: List
             if g_start == g_end - 1:
                 group_exprs.append(_get_effective_cond(g_start))
             else:
-
                 has_inner_or = any(
                     _get_effective_jump(i) == body_block
                     for i in range(g_start, g_end - 1)
@@ -3244,6 +3427,9 @@ def _generate_compound_condition_if(region: Region, cfg: CFG, instructions: List
         compound_cond = group_exprs[0]
         for expr in group_exprs[1:]:
             compound_cond = BinaryExpr(compound_cond, '||', expr)
+
+    if return_condition_only:
+        return (compound_cond, preamble_stmts)
 
     if region.type == RegionType.IF_THEN_ELSE and region.then_region and region.else_region:
         ternary_result = _try_ternary_from_regions(
@@ -3274,6 +3460,61 @@ def _generate_compound_condition_if(region: Region, cfg: CFG, instructions: List
     decompiler.flag = saved_flag
     decompiler.flag_negated = saved_flag_negated
 
+    if decompiler._switch_break_stack:
+        switch_break = decompiler._switch_break_stack[-1]
+
+        def _check_region_exit_is_switch_break_cc(r):
+            if r is None:
+                return False
+            for bid in r.blocks:
+                blk = cfg.get_block(bid)
+                if blk and blk.terminator == 'jmp':
+                    jmp_instr = instructions[blk.end_idx - 1]
+                    if jmp_instr.op == VM.JMP:
+                        target = jmp_instr.addr + jmp_instr.operands[0]
+                        if target >= switch_break:
+                            return True
+            return False
+
+        if then_stmts and not else_stmts:
+            if _check_region_exit_is_switch_break_cc(region.then_region):
+                false_exits_switch = False
+                eb = cfg.get_block(else_block)
+                if eb is not None:
+                    false_branch_addr = instructions[eb.start_idx].addr
+                    if false_branch_addr >= switch_break:
+                        false_exits_switch = True
+                    else:
+                        if (eb.terminator == 'jmp'
+                                and eb.end_idx - eb.start_idx == 1):
+                            ft_jmp = instructions[eb.end_idx - 1]
+                            if ft_jmp.op == VM.JMP:
+                                ft_target = ft_jmp.addr + ft_jmp.operands[0]
+                                if ft_target >= switch_break:
+                                    false_exits_switch = True
+                if not false_exits_switch:
+                    if not isinstance(then_stmts[-1], (BreakStmt, ReturnStmt, ContinueStmt)):
+                        then_stmts.append(BreakStmt())
+
+        if not then_stmts and not else_stmts:
+            if _check_region_exit_is_switch_break_cc(region.then_region):
+                false_exits_switch = False
+                eb = cfg.get_block(else_block)
+                if eb is not None:
+                    false_branch_addr = instructions[eb.start_idx].addr
+                    if false_branch_addr >= switch_break:
+                        false_exits_switch = True
+                if not false_exits_switch:
+                    then_stmts = [BreakStmt()]
+
+        if not then_stmts and else_stmts:
+            if _check_region_exit_is_switch_break_cc(region.then_region):
+                then_stmts = [BreakStmt()]
+
+        if not else_stmts and then_stmts and region.type == RegionType.IF_THEN_ELSE:
+            if _check_region_exit_is_switch_break_cc(region.else_region):
+                else_stmts = [BreakStmt()]
+
     if_stmt = IfStmt(compound_cond, then_stmts, else_stmts)
     result = preamble_stmts + [if_stmt]
 
@@ -3282,8 +3523,8 @@ def _generate_compound_condition_if(region: Region, cfg: CFG, instructions: List
         eb = cfg.get_block(else_block)
         if eb is not None:
             false_branch_addr = instructions[eb.start_idx].addr
-            _, loop_exit_addr, _ = loop_context
-            if false_branch_addr >= loop_exit_addr:
+            _, loop_exit_addr, continue_target = loop_context
+            if false_branch_addr >= loop_exit_addr and false_branch_addr != continue_target:
                 break_stmt = then_stmts.pop()
                 result.append(break_stmt)
 
@@ -3523,8 +3764,13 @@ def _find_branch_target_reg(cfg: CFG, instructions: List[Instruction],
                 last_was_flag_op = False
             elif op in (VM.CALL, VM.CALLD, VM.CALLI):
                 if ops[0] == 0:
-                    has_side_effects = True
-                target_reg = ops[0]
+                    if op in (VM.CALLD, VM.CALLI) and len(ops) > 1 and ops[1] in local_new_regs:
+                        target_reg = ops[1]
+                    else:
+                        has_side_effects = True
+                        target_reg = ops[0]
+                else:
+                    target_reg = ops[0]
                 new_target_reg = None
                 last_was_flag_op = False
             elif op == VM.NEW:
@@ -3612,6 +3858,49 @@ def _find_branch_target_reg(cfg: CFG, instructions: List[Instruction],
         return (target_reg, has_side_effects)
     return None
 
+def _find_subregion_by_header(region, target_block_id):
+    if region is None:
+        return None
+    if region.header_block == target_block_id:
+        return region
+    if region.type == RegionType.SEQUENCE and region.children:
+        for child in region.children:
+            result = _find_subregion_by_header(child, target_block_id)
+            if result is not None:
+                return result
+    for attr in ('then_region', 'else_region', 'body_region'):
+        sub = getattr(region, attr, None)
+        if sub is not None:
+            result = _find_subregion_by_header(sub, target_block_id)
+            if result is not None:
+                return result
+    return None
+
+def _extract_counter_register(instructions: List, header) -> 'Optional[int]':
+    for idx in range(header.end_idx - 1, header.start_idx - 1, -1):
+        ins = instructions[idx]
+        if ins.op in (VM.CLT, VM.CGT, VM.CEQ, VM.CDEQ):
+            op0 = ins.operands[0]
+            if op0 < 0:
+                return op0
+            if len(ins.operands) > 1 and ins.operands[1] < 0:
+                return ins.operands[1]
+            return None
+    return None
+
+def _writes_to_counter(ins, counter_reg: int) -> bool:
+    if ins.op in (VM.INC, VM.DEC) and ins.operands[0] == counter_reg:
+        return True
+    if ins.op in (VM.ADD, VM.SUB) and ins.operands[0] == counter_reg:
+        return True
+    if ins.op in (VM.ADDPI, VM.SUBPI) and ins.operands[0] == counter_reg:
+        return True
+    if ins.op == VM.CP and ins.operands[0] == counter_reg:
+        return True
+    if ins.op == VM.CONST and ins.operands[0] == counter_reg:
+        return True
+    return False
+
 def _generate_while(region: Region, cfg: CFG, instructions: List[Instruction],
                      decompiler: 'Decompiler', obj: CodeObject) -> List[Stmt]:
     loop_info = region.loop_info
@@ -3619,20 +3908,69 @@ def _generate_while(region: Region, cfg: CFG, instructions: List[Instruction],
     if header is None or loop_info is None:
         return []
 
-    preamble_stmts, cond, _, deferred_se = _process_condition_block_preamble(
-        instructions, decompiler, obj, header.start_idx, header.end_idx
-    )
-    cond = _detect_assignment_in_condition(preamble_stmts, cond)
+    compound_chain_used = False
+    chain_result = _detect_condition_chain(cfg, region.header_block, instructions)
+    if chain_result is not None:
+        chain_blocks_list, chain_body, chain_else, chain_nf_ids = chain_result
+        chain_body_in_body = chain_body in loop_info.body_blocks
+        chain_else_in_exit = chain_else in loop_info.exit_blocks
+        if not chain_else_in_exit:
+            ce_blk = cfg.get_block(chain_else)
+            if (ce_blk and ce_blk.terminator == 'jmp'
+                    and len(ce_blk.successors) == 1
+                    and ce_blk.end_idx - ce_blk.start_idx == 1):
+                chain_else_in_exit = ce_blk.successors[0] in loop_info.exit_blocks
+        if not chain_else_in_exit:
+            cb_blk = cfg.get_block(chain_body)
+            if (cb_blk and cb_blk.terminator == 'jmp'
+                    and len(cb_blk.successors) == 1
+                    and cb_blk.end_idx - cb_blk.start_idx == 1):
+                cb_resolved = cb_blk.successors[0]
+                if (cb_resolved in loop_info.exit_blocks
+                        and chain_else in loop_info.body_blocks):
+                    chain_body, chain_else = chain_else, chain_body
+                    chain_body_in_body = True
+                    chain_else_in_exit = True
+        if chain_body_in_body and chain_else_in_exit:
+            class _ChainInfo:
+                pass
+            ci = _ChainInfo()
+            ci._condition_chain = chain_blocks_list
+            ci._chain_body_block = chain_body
+            ci._chain_else_block = chain_else
+            ci._chain_nf_block_ids = chain_nf_ids if chain_nf_ids else set()
+            result = _generate_compound_condition_if(
+                ci, cfg, instructions, decompiler, obj, None,
+                return_condition_only=True
+            )
+            loop_cond, preamble_stmts = result
+            body_sub = _find_subregion_by_header(region.body_region, chain_body)
+            if body_sub is not None:
+                region.body_region = body_sub
+            else:
+                region.body_region = Region(
+                    type=RegionType.BLOCK,
+                    header_block=chain_body,
+                    blocks={chain_body}
+                )
+            region._compound_extracted = ([], [])
+            compound_chain_used = True
 
-    if header.terminator == 'jnf':
-        loop_cond = cond
-    else:
-        loop_cond = decompiler._negate_expr(cond)
+    if not compound_chain_used:
+        preamble_stmts, cond, _, deferred_se = _process_condition_block_preamble(
+            instructions, decompiler, obj, header.start_idx, header.end_idx
+        )
+        cond = _detect_assignment_in_condition(preamble_stmts, cond)
 
-    loop_cond, merged_addrs = decompiler._apply_cond_side_effects(
-        loop_cond, instructions, header.start_idx, header.end_idx - 1
-    )
-    _emit_unmerged_side_effects(preamble_stmts, deferred_se, merged_addrs)
+        if header.terminator == 'jnf':
+            loop_cond = cond
+        else:
+            loop_cond = decompiler._negate_expr(cond)
+
+        loop_cond, merged_addrs = decompiler._apply_cond_side_effects(
+            loop_cond, instructions, header.start_idx, header.end_idx - 1
+        )
+        _emit_unmerged_side_effects(preamble_stmts, deferred_se, merged_addrs)
 
     extra_cond_blocks = []
     extra_preamble_stmts = []
@@ -3658,13 +3996,10 @@ def _generate_while(region: Region, cfg: CFG, instructions: List[Instruction],
     )
     tail = cfg.get_block(loop_info.back_edge_source)
     tail_start_addr = instructions[tail.start_idx].addr if tail else None
-    has_for_continue = False
-
+    _has_tail_jmp = False
     if tail and tail_start_addr is not None and tail_start_addr != loop_start_addr:
         for bid in loop_info.body_blocks:
-            if bid == loop_info.back_edge_source:
-                continue
-            if bid == loop_info.header:
+            if bid == loop_info.back_edge_source or bid == loop_info.header:
                 continue
             blk = cfg.get_block(bid)
             if blk is None:
@@ -3675,14 +4010,49 @@ def _generate_while(region: Region, cfg: CFG, instructions: List[Instruction],
                 if last_ins.op == VM.JMP:
                     target = last_ins.addr + last_ins.operands[0]
                     if target == tail_start_addr:
-                        has_for_continue = True
+                        _has_tail_jmp = True
                         break
 
+    _tail_is_pure = False
+    if _has_tail_jmp and tail:
+        _counter_reg = _extract_counter_register(instructions, header)
+        if _counter_reg is not None:
+            first_tail_ins = instructions[tail.start_idx]
+            if _writes_to_counter(first_tail_ins, _counter_reg):
+                _tail_is_pure = True
+            elif (first_tail_ins.op == VM.CONST
+                  and tail.start_idx + 1 < tail.end_idx
+                  and _writes_to_counter(instructions[tail.start_idx + 1], _counter_reg)):
+                _tail_is_pure = True
+
+    _body_bypasses_tail = False
+    if _has_tail_jmp:
+        for bid in loop_info.body_blocks:
+            if bid == loop_info.back_edge_source or bid == loop_info.header:
+                continue
+            blk = cfg.get_block(bid)
+            if blk is None:
+                continue
+            last_ins_idx = blk.end_idx - 1
+            if last_ins_idx >= blk.start_idx:
+                last_ins = instructions[last_ins_idx]
+                if last_ins.op == VM.JMP:
+                    target = last_ins.addr + last_ins.operands[0]
+                    if target == loop_start_addr:
+                        _body_bypasses_tail = True
+                        break
+
+    has_for_continue = _has_tail_jmp and _tail_is_pure and not _body_bypasses_tail
     continue_target = tail_start_addr if has_for_continue else loop_start_addr
 
     if has_for_continue:
-        body_loop_context = (loop_start_addr, loop_exit_addr, loop_start_addr)
+        tail_block_id = loop_info.back_edge_source
+        body_loop_context = (loop_start_addr, loop_exit_addr, tail_start_addr)
 
+        saved_update_addr = decompiler._for_loop_update_addr
+        saved_skip_tail_bid = decompiler._for_loop_skip_tail_bid
+        decompiler._for_loop_update_addr = tail_start_addr
+        decompiler._for_loop_skip_tail_bid = tail_block_id
         decompiler.loop_context_stack.append(body_loop_context)
         try:
             body_stmts = generate_code(
@@ -3691,19 +4061,39 @@ def _generate_while(region: Region, cfg: CFG, instructions: List[Instruction],
             ) if body_region else []
         finally:
             decompiler.loop_context_stack.pop()
+            decompiler._for_loop_update_addr = saved_update_addr
+            decompiler._for_loop_skip_tail_bid = saved_skip_tail_bid
 
         while body_stmts and isinstance(body_stmts[-1], ContinueStmt):
             body_stmts.pop()
 
         update_expr = None
-        if body_stmts and isinstance(body_stmts[-1], ExprStmt):
-            update_stmt = body_stmts.pop()
-            update_expr = update_stmt.expr
+        tail_block = cfg.get_block(tail_block_id)
+        if tail_block:
+            update_stmts = _generate_block_for_update(
+                tail_block, instructions, decompiler, obj
+            )
+            if update_stmts:
+                all_expr = all(isinstance(s, ExprStmt) for s in update_stmts)
+                if all_expr:
+                    if len(update_stmts) == 1:
+                        update_expr = update_stmts[0].expr
+                    else:
+                        update_expr = CommaExpr([s.expr for s in update_stmts])
+                elif isinstance(update_stmts[-1], ExprStmt):
+                    update_expr = update_stmts[-1].expr
+                    if len(update_stmts) > 1:
+                        body_stmts.extend(update_stmts[:-1])
 
         if update_expr is not None:
             for_stmt = ForStmt(init=None, condition=loop_cond, update=update_expr, body=body_stmts)
             return preamble_stmts + [for_stmt]
         else:
+            if tail_block:
+                fallback_stmts = _generate_block_for_update(
+                    tail_block, instructions, decompiler, obj
+                )
+                body_stmts.extend(fallback_stmts)
             return preamble_stmts + [WhileStmt(loop_cond, body_stmts)]
     else:
         body_loop_context = (loop_start_addr, loop_exit_addr, continue_target)
@@ -3826,13 +4216,11 @@ def _build_compound_dowhile_cond(
         header_addr: int,
         instructions: List[Instruction],
         decompiler: 'Decompiler', obj: CodeObject) -> Tuple[Expr, List[Stmt]]:
-
     or_groups = []
     and_chain = []
     all_preamble = []
 
     for start_idx, end_idx, terminator in cond_ranges:
-
         for idx in range(start_idx, end_idx):
             instr = instructions[idx]
             if instr.op in (VM.JF, VM.JNF, VM.JMP):
@@ -3851,7 +4239,6 @@ def _build_compound_dowhile_cond(
             target = None
 
         if target == header_addr:
-
             if terminator == 'jf':
                 and_chain.append(cond)
             else:
@@ -3863,7 +4250,6 @@ def _build_compound_dowhile_cond(
                 or_groups.append(group)
                 and_chain = []
         else:
-
             if terminator == 'jnf':
                 and_chain.append(cond)
             else:
@@ -3953,7 +4339,6 @@ def _generate_do_while(region: Region, cfg: CFG, instructions: List[Instruction]
         body_stmts.extend(cond_preamble)
     else:
         if _is_compound_dowhile(loop_info):
-
             cond_start_idx = header.start_idx
             back_jump_idx = header.end_idx - 1
             for j in range(back_jump_idx - 1, header.start_idx - 1, -1):
@@ -3996,9 +4381,7 @@ def _generate_do_while(region: Region, cfg: CFG, instructions: List[Instruction]
                 decompiler.loop_context_stack.pop()
 
             cond_ranges = []
-
             cond_ranges.append((cond_start_idx, header.end_idx, header.terminator))
-
             tail_bid = loop_info.back_edge_source
             for bid in sorted(loop_info.body_blocks,
                               key=lambda b: cfg.get_block(b).start_idx
@@ -4009,7 +4392,6 @@ def _generate_do_while(region: Region, cfg: CFG, instructions: List[Instruction]
                 if block and block.start_idx >= header.end_idx:
                     cond_ranges.append(
                         (block.start_idx, block.end_idx, block.terminator))
-
             if tail_bid not in loop_info.body_blocks:
                 tb = cfg.get_block(tail_bid)
                 if tb:
@@ -4190,7 +4572,7 @@ def _generate_switch(region: Region, cfg: CFG, instructions: List[Instruction],
                 if succ is None:
                     continue
                 succ_addr = instructions[succ.start_idx].addr
-                if succ_addr > max_switch_addr and succ_addr != loop_start_addr:
+                if succ_addr > max_switch_addr and succ_addr != loop_start_addr and succ_addr != loop_context[2]:
                     has_exit_to_after_switch = True
                     break
             if has_exit_to_after_switch:
@@ -4359,6 +4741,17 @@ def _generate_try_catch(region: Region, cfg: CFG, instructions: List[Instruction
     saved_flag_negated = decompiler.flag_negated
 
     try_stmts = []
+    catch_exit_addr = None
+    if region.exit_block is not None:
+        exit_blk = cfg.get_block(region.exit_block)
+        if exit_blk:
+            catch_exit_addr = instructions[exit_blk.start_idx].addr
+    tc_loop_context = loop_context
+    if (loop_context and decompiler._for_loop_update_addr is not None
+            and loop_context[2] != decompiler._for_loop_update_addr
+            and catch_exit_addr != decompiler._for_loop_update_addr):
+        tc_loop_context = (loop_context[0], loop_context[1], decompiler._for_loop_update_addr)
+
     if region.try_region:
         try_stmts = generate_code(region.try_region, cfg, instructions, decompiler, obj, loop_context)
 
@@ -4370,7 +4763,7 @@ def _generate_try_catch(region: Region, cfg: CFG, instructions: List[Instruction
 
     catch_stmts = []
     if region.catch_region:
-        catch_stmts = generate_code(region.catch_region, cfg, instructions, decompiler, obj, loop_context)
+        catch_stmts = generate_code(region.catch_region, cfg, instructions, decompiler, obj, tc_loop_context)
         if has_catch_cp and catch_stmts:
             catch_stmts = catch_stmts[1:]
 

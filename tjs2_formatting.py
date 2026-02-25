@@ -1,3 +1,4 @@
+
 import re
 
 MAX_LINE_LENGTH = 120
@@ -409,7 +410,6 @@ def _try_format_condition(content: str, indent: str, inner_indent: str) -> list:
 
     m = re.match(r'((?:}\s*else\s+)?(?:if|while|for))\s*\(', content)
     if not m:
-
         m = re.match(r'(return\s+)', content)
         if m:
             return _try_format_return_condition(content, indent, inner_indent, m)
@@ -438,7 +438,6 @@ def _try_format_condition(content: str, indent: str, inner_indent: str) -> list:
 def _try_format_return_condition(content, indent, inner_indent, m):
     prefix = m.group(1)
     rest = content[m.end():]
-
     if rest.endswith(';'):
         rest = rest[:-1]
         suffix = ';'
@@ -700,7 +699,6 @@ def _try_format_comma_continuation(content: str, indent: str, inner_indent: str)
         elif ch == '}':
             depth -= 1
         elif ch == ',' and depth <= 0:
-
             split_points.append(i)
         i += 1
 
@@ -755,7 +753,6 @@ def _split_at_plus(text: str) -> list:
             depth -= 1
             current.append(ch)
         elif depth == 0 and ch == '+' and i + 1 < len(text) and text[i+1] != '+':
-
             if i + 1 < len(text) and text[i+1] == '=':
                 current.append(ch)
             else:
@@ -764,7 +761,6 @@ def _split_at_plus(text: str) -> list:
                     parts.append(part)
                 current = []
                 i += 1
-
                 while i < len(text) and text[i] == ' ':
                     i += 1
                 continue

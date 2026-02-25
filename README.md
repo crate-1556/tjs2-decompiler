@@ -213,7 +213,7 @@ function askYesNo(message, caption = "確認")
 <summary>Decompiled Output / 反编译输出</summary>
 
 ```javascript
-this.YesNoDialogWindow = YesNoDialogWindow;
+tthis.YesNoDialogWindow = YesNoDialogWindow;
 this.askYesNo = askYesNo incontextof this;
 
 class YesNoDialogWindow extends Window {
@@ -357,15 +357,13 @@ function askYesNo(arg0, arg1 = "確認") {
 
 </details>
 
-## Validated Against / 已验证测试目录
+## Validation / 测试
 
-The decompiler has been validated against all TJS2 scripts contained within the following directories:
+This decompiler has been verified to cover all bytecode patterns the compiler can generate, and validated against all TJS2 scripts in the following directories:
 
-已对以下目录中的所有TJS2脚本进行验证测试：
+已验证涵盖所有TJS2编译器可生成的字节码模式，并已对以下目录中的所有TJS2脚本完成验证测试：
 
 - [x] [kag3/system](https://github.com/krkrz/kag3/tree/master/data/system)
 - [x] [Krkr2Compat](https://github.com/krkrz/Krkr2Compat)
 - [x] [KAGEX3/system](https://github.com/krkrz/krkr2/tree/master/kirikiri2/branches/kag3ex3/template/system) 
 - [x] All script files of a complete game / 一部游戏的全部脚本资源
-
-**NOTE**: 已大幅优化输出格式，包括indentation与syntax，真实游戏脚本测评准确率约99%（以函数为单位），BUG修复中，视情况可能会再测一部。

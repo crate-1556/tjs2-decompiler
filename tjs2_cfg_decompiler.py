@@ -1,3 +1,4 @@
+
 import sys
 from typing import List, Optional
 
@@ -13,6 +14,7 @@ from tjs2_structuring import (
 )
 
 class CFGDecompiler(Decompiler):
+
     def __init__(self, loader: BytecodeLoader):
         super().__init__(loader)
 
