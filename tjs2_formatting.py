@@ -1117,4 +1117,3 @@ def _merge_else_if_pass(source: str) -> str:
         i = close_idx + 1
 
     return '\n'.join(result)
-

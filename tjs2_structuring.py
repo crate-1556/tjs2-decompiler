@@ -4787,7 +4787,7 @@ def _generate_try_catch(region: Region, cfg: CFG, instructions: List[Instruction
         if region.exception_reg is not None and region.exception_reg < -2:
             catch_var_name = decompiler._get_local_name(region.exception_reg)
         else:
-            catch_var_name = f'%{region.exception_reg}'
+            catch_var_name = '_e'
 
     saved_regs = dict(decompiler.regs)
     saved_flag = decompiler.flag

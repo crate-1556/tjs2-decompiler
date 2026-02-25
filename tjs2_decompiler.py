@@ -979,12 +979,39 @@ class Decompiler:
         prop_indices = {obj.index for obj in self.loader.objects
                         if obj.context_type == ContextType.PROPERTY and obj.parent in class_indices}
 
+        func_indices = {obj.index for obj in self.loader.objects
+                        if obj.context_type == ContextType.FUNCTION}
+        self._func_children = {}
+        self._func_children_at_top = set()
+        for obj in self.loader.objects:
+            if (obj.parent in func_indices
+                    and obj.context_type in (ContextType.PROPERTY, ContextType.FUNCTION, ContextType.CLASS)
+                    and obj.parent != obj.index):
+                self._func_children.setdefault(obj.parent, []).append(obj)
+        for parent_idx, children in self._func_children.items():
+            parent_obj = next((o for o in self.loader.objects if o.index == parent_idx), None)
+            if parent_obj and parent_obj.data:
+                child_idx_set = {c.index for c in children}
+                for di, d in enumerate(parent_obj.data):
+                    if isinstance(d, tuple) and len(d) == 2 and d[0] == 'inter_object' and d[1] in child_idx_set:
+                        self._func_children_at_top.add(d[1])
+                    else:
+                        break
+        func_prop_indices = {obj.index for obj in self.loader.objects
+                             if obj.context_type == ContextType.PROPERTY and obj.parent in func_indices}
+
         handled_by_parent = set()
         for children in self._class_children.values():
             for child in children:
                 handled_by_parent.add(child.index)
         for obj in self.loader.objects:
             if obj.parent in prop_indices:
+                handled_by_parent.add(obj.index)
+        for children in self._func_children.values():
+            for child in children:
+                handled_by_parent.add(child.index)
+        for obj in self.loader.objects:
+            if obj.parent in func_prop_indices:
                 handled_by_parent.add(obj.index)
 
         if self.loader.toplevel >= 0:
@@ -1091,6 +1118,89 @@ class Decompiler:
                 stmts = [VarDeclStmt(name) for name in undeclared] + stmts
         return stmts
 
+    def _hoist_cross_scope_vars(self, stmts: list) -> list:
+        import re
+        LOCAL_RE = re.compile(r'\blocal\d+(?:_\d+)?\b')
+
+        def _get_child_bodies(stmt):
+            if isinstance(stmt, IfStmt):
+                return [stmt.then_body, stmt.else_body]
+            if isinstance(stmt, (WhileStmt, DoWhileStmt)):
+                return [stmt.body]
+            if isinstance(stmt, ForStmt):
+                return [stmt.body]
+            if isinstance(stmt, TryStmt):
+                return [stmt.try_body, stmt.catch_body]
+            if isinstance(stmt, WithStmt):
+                return [stmt.body]
+            if isinstance(stmt, SwitchStmt):
+                return [body for _, body in stmt.cases]
+            return []
+
+        def _direct_var_decls(body):
+            names = set()
+            for s in body:
+                if isinstance(s, VarDeclStmt):
+                    names.add(s.name)
+            return names
+
+        def _all_var_refs(stmts_list):
+            src = '\n'.join(s.to_source(0) for s in stmts_list)
+            return set(LOCAL_RE.findall(src))
+
+        def _convert_decl_to_assign(stmt, names):
+            if isinstance(stmt, VarDeclStmt) and stmt.name in names:
+                if stmt.value:
+                    return ExprStmt(AssignExpr(VarExpr(stmt.name), stmt.value))
+                return None
+            for body in _get_child_bodies(stmt):
+                for i, s in enumerate(body):
+                    r = _convert_decl_to_assign(s, names)
+                    if r is not s:
+                        if r is None:
+                            body[i] = ExprStmt(AssignExpr(VarExpr('_'), VoidExpr()))
+                            body[i] = None
+                        else:
+                            body[i] = r
+                body[:] = [s for s in body if s is not None]
+            if isinstance(stmt, ForStmt) and isinstance(stmt.init, VarDeclStmt) and stmt.init.name in names:
+                stmt.init = AssignExpr(VarExpr(stmt.init.name), stmt.init.value) if stmt.init.value else None
+            return stmt
+
+        for stmt in stmts:
+            for body in _get_child_bodies(stmt):
+                body[:] = self._hoist_cross_scope_vars(body)
+
+        hoisted = set()
+        for i, stmt in enumerate(stmts):
+            bodies = _get_child_bodies(stmt)
+            if not bodies:
+                continue
+            inner_decls = set()
+            for body in bodies:
+                inner_decls.update(_direct_var_decls(body))
+            if not inner_decls:
+                continue
+            if i + 1 < len(stmts):
+                remaining_refs = _all_var_refs(stmts[i+1:])
+                hoisted.update(inner_decls & remaining_refs)
+            if len(bodies) >= 2:
+                for bi, body in enumerate(bodies):
+                    decls_here = _direct_var_decls(body)
+                    for bj, other_body in enumerate(bodies):
+                        if bi != bj and other_body:
+                            other_refs = _all_var_refs(other_body)
+                            hoisted.update(decls_here & other_refs)
+
+        if not hoisted:
+            return stmts
+
+        for stmt in stmts:
+            _convert_decl_to_assign(stmt, hoisted)
+        new_stmts = [VarDeclStmt(name) for name in sorted(hoisted)]
+        new_stmts.extend(stmts)
+        return new_stmts
+
     def _decompile_function(self, obj: CodeObject) -> str:
         self._reset_state()
         self.current_obj = obj
@@ -1101,8 +1211,8 @@ class Decompiler:
         for i, arg in enumerate(args):
             if arg == '*':
                 continue
-            if arg.startswith('*'):
-                name = arg[1:]
+            if arg != '*' and arg.endswith('*'):
+                name = arg[:-1]
                 reg = -(3 + i)
                 self.regs[reg] = VarExpr(name)
                 self.local_vars[reg] = name
@@ -1117,11 +1227,39 @@ class Decompiler:
 
         stmts = self._wrap_with_blocks(stmts)
 
+        stmts = self._hoist_cross_scope_vars(stmts)
+
         stmts = self._prepend_context_var_decls(obj, stmts)
 
         lines = [f'function {obj.name or "anonymous"}({args_str}) {{']
+
+        func_children = getattr(self, '_func_children', {}).get(obj.index, [])
+        top_children = [c for c in func_children if c.index in self._func_children_at_top]
+        bottom_children = [c for c in func_children if c.index not in self._func_children_at_top]
+
+        def _emit_children(child_list):
+            result = []
+            for child_obj in child_list:
+                result.append('')
+                try:
+                    child_src = self._decompile_object_definition(child_obj)
+                    for line in child_src.split('\n'):
+                        result.append('    ' + line)
+                except Exception as e:
+                    result.append(f'    /* ERROR decompiling {child_obj.name}: {e} */')
+            return result
+
+        if top_children:
+            lines.extend(_emit_children(top_children))
+            lines.append('')
+
         for stmt in stmts:
             lines.append(stmt.to_source(1))
+
+        if bottom_children:
+            lines.extend(_emit_children(bottom_children))
+            lines.append('')
+
         lines.append('}')
 
         return '\n'.join(lines)
@@ -1136,8 +1274,8 @@ class Decompiler:
         for i, arg in enumerate(args):
             if arg == '*':
                 continue
-            if arg.startswith('*'):
-                name = arg[1:]
+            if arg != '*' and arg.endswith('*'):
+                name = arg[:-1]
                 reg = -(3 + i)
                 self.regs[reg] = VarExpr(name)
                 self.local_vars[reg] = name
@@ -1151,6 +1289,8 @@ class Decompiler:
         stmts = self._decompile_object(obj)
 
         stmts = self._wrap_with_blocks(stmts)
+
+        stmts = self._hoist_cross_scope_vars(stmts)
 
         stmts = self._prepend_context_var_decls(obj, stmts)
 
@@ -1207,8 +1347,8 @@ class Decompiler:
         for i, arg in enumerate(args):
             if arg == '*':
                 continue
-            if arg.startswith('*'):
-                name = arg[1:]
+            if arg != '*' and arg.endswith('*'):
+                name = arg[:-1]
                 reg = -(3 + i)
                 self.regs[reg] = VarExpr(name)
                 self.local_vars[reg] = name
@@ -1283,8 +1423,8 @@ class Decompiler:
                 for i, arg in enumerate(args):
                     if arg == '*':
                         continue
-                    if arg.startswith('*'):
-                        name = arg[1:]
+                    if arg != '*' and arg.endswith('*'):
+                        name = arg[:-1]
                         reg = -(3 + i)
                         self.regs[reg] = VarExpr(name)
                         self.local_vars[reg] = name
@@ -1355,7 +1495,7 @@ class Decompiler:
                 parent_data_strs = {v for v in parent_obj.data if isinstance(v, str)}
                 if collapse_name in parent_data_strs:
                     collapse_name = '_args'
-            args.append(f'*{collapse_name}')
+            args.append(f'{collapse_name}*')
         elif obj.func_decl_unnamed_arg_array_base > 0:
             args.append('*')
         return args
@@ -4318,6 +4458,15 @@ class Decompiler:
 
             if op == VM.SPDS and r1 != -1:
                 target = UnaryExpr('&', target)
+
+            if op == VM.SPDS and r1 == -1:
+                ref_expr = value
+                if isinstance(ref_expr, InContextOfExpr):
+                    ref_expr = ref_expr.func
+                if isinstance(ref_expr, FuncRefExpr):
+                    ref_obj = self.loader.objects[ref_expr.obj_index]
+                    if ContextType(ref_obj.context_type) == ContextType.PROPERTY:
+                        return None
 
             return ExprStmt(AssignExpr(target, value))
 
