@@ -940,7 +940,8 @@ def _build_region_recursive(cfg: CFG, instructions: List[Instruction],
         if current in loop_by_header and current not in processed:
             loop_info = loop_by_header[current]
             loop_region = _build_loop_region(
-                cfg, instructions, loop_info, loop_by_header, processed
+                cfg, instructions, loop_info, loop_by_header, processed,
+                switch_exit_addr=switch_exit_addr
             )
             children.append(loop_region)
             all_blocks.update(loop_region.blocks)
@@ -2709,6 +2710,11 @@ def _embed_assign_in_expr_tree(expr: Expr, target_value: Expr,
             if _embed_assign_in_expr_tree(arg, target_value, assign_expr):
                 return True
     elif isinstance(expr, MethodCallExpr):
+        if expr.obj is target_value:
+            expr.obj = assign_expr
+            return True
+        if _embed_assign_in_expr_tree(expr.obj, target_value, assign_expr):
+            return True
         for i, arg in enumerate(expr.args):
             if arg is target_value:
                 expr.args[i] = assign_expr
@@ -2734,7 +2740,7 @@ def _embed_assign_in_expr_tree(expr: Expr, target_value: Expr,
             if _embed_assign_in_expr_tree(expr.prop, target_value, assign_expr):
                 return True
     elif isinstance(expr, TernaryExpr):
-        for attr in ('cond', 'true_expr', 'false_expr'):
+        for attr in ('cond', 'true_val', 'false_val'):
             child = getattr(expr, attr)
             if child is target_value:
                 setattr(expr, attr, assign_expr)
@@ -4266,7 +4272,42 @@ def _build_compound_dowhile_cond(
         for g in or_groups[1:]:
             result = BinaryExpr(result, '||', g)
         return result, all_preamble
-    return Identifier('true'), all_preamble
+    return ConstExpr(True), all_preamble
+
+def _strip_dowhile_merge_continues(stmts):
+    while stmts and isinstance(stmts[-1], ContinueStmt):
+        stmts.pop()
+    if not stmts:
+        return
+    last = stmts[-1]
+    if isinstance(last, IfStmt):
+        if last.then_body:
+            _strip_dowhile_merge_continues(last.then_body)
+        if last.else_body:
+            _strip_dowhile_merge_continues(last.else_body)
+        if not last.then_body and last.else_body:
+            last.condition = _negate_condition(last.condition)
+            last.then_body = last.else_body
+            last.else_body = []
+    elif isinstance(last, TryStmt):
+        if last.try_body:
+            _strip_dowhile_merge_continues(last.try_body)
+        if last.catch_body:
+            _strip_dowhile_merge_continues(last.catch_body)
+
+def _negate_condition(expr):
+    if isinstance(expr, UnaryExpr) and expr.op == '!':
+        return expr.operand
+    if isinstance(expr, BinaryExpr):
+        _neg_map = {
+            '==': '!=', '!=': '==',
+            '<': '>=', '>=': '<',
+            '>': '<=', '<=': '>',
+            '===': '!==', '!==': '===',
+        }
+        if expr.op in _neg_map:
+            return BinaryExpr(expr.left, _neg_map[expr.op], expr.right)
+    return UnaryExpr('!', expr)
 
 def _generate_do_while(region: Region, cfg: CFG, instructions: List[Instruction],
                         decompiler: 'Decompiler', obj: CodeObject) -> List[Stmt]:
@@ -4288,9 +4329,12 @@ def _generate_do_while(region: Region, cfg: CFG, instructions: List[Instruction]
         loop_exit_addr = instructions[exit_idx].addr
     else:
         loop_exit_addr = loop_start_addr + 1000
-    body_loop_context = (loop_start_addr, loop_exit_addr, loop_start_addr)
-
     is_self_loop = (loop_info.header == loop_info.back_edge_source)
+    if is_self_loop:
+        continue_target_addr = loop_start_addr
+    else:
+        continue_target_addr = instructions[tail.start_idx].addr
+    body_loop_context = (loop_start_addr, loop_exit_addr, continue_target_addr)
 
     if is_self_loop:
         cond_start_idx = header.start_idx
@@ -4330,6 +4374,8 @@ def _generate_do_while(region: Region, cfg: CFG, instructions: List[Instruction]
                 body_stmts.append(flushed)
         finally:
             decompiler.loop_context_stack.pop()
+
+        _strip_dowhile_merge_continues(body_stmts)
 
         cond_preamble, cond, _, deferred_se_self = _process_condition_block_preamble(
             instructions, decompiler, obj, cond_start_idx, back_jump_idx + 1,
@@ -4380,6 +4426,8 @@ def _generate_do_while(region: Region, cfg: CFG, instructions: List[Instruction]
             finally:
                 decompiler.loop_context_stack.pop()
 
+            _strip_dowhile_merge_continues(body_stmts)
+
             cond_ranges = []
             cond_ranges.append((cond_start_idx, header.end_idx, header.terminator))
             tail_bid = loop_info.back_edge_source
@@ -4411,6 +4459,8 @@ def _generate_do_while(region: Region, cfg: CFG, instructions: List[Instruction]
                 ) if region.body_region else []
             finally:
                 decompiler.loop_context_stack.pop()
+
+            _strip_dowhile_merge_continues(body_stmts)
 
             back_jump_idx = tail.end_idx - 1
             tail_cond_start = tail.start_idx
@@ -4669,6 +4719,9 @@ def _generate_switch(region: Region, cfg: CFG, instructions: List[Instruction],
                                 sc.has_break = True
                             break
 
+        if sc.fall_through and body_stmts and isinstance(body_stmts[-1], BreakStmt):
+            body_stmts.pop()
+
         if sc.has_continue and not sc.has_break and not sc.fall_through and not sc.body_is_continue:
             if not body_stmts or not isinstance(body_stmts[-1], ContinueStmt):
                 body_stmts.append(ContinueStmt())
@@ -4731,7 +4784,7 @@ def _generate_try_catch(region: Region, cfg: CFG, instructions: List[Instruction
                 has_catch_cp = True
 
     if catch_var_name is None:
-        if region.exception_reg < -2:
+        if region.exception_reg is not None and region.exception_reg < -2:
             catch_var_name = decompiler._get_local_name(region.exception_reg)
         else:
             catch_var_name = f'%{region.exception_reg}'

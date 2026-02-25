@@ -1,4 +1,3 @@
-
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Set, Tuple
 from tjs2_decompiler import VM, Instruction

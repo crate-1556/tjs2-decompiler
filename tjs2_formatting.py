@@ -1,4 +1,3 @@
-
 import re
 
 MAX_LINE_LENGTH = 120
@@ -958,12 +957,15 @@ def _restore_super_calls(source: str, inheritance_map: dict) -> str:
     current_class = None
     current_parent = None
     brace_depth = 0
+    class_stack = []
 
     for line in lines:
         stripped = line.strip()
 
         cm = re.match(r'^(\s*)class\s+(\w+)(?:\s+extends\s+(\w+))?\s*\{', line)
         if cm:
+            if current_class is not None:
+                class_stack.append((current_class, current_parent, brace_depth))
             current_class = cm.group(2)
             current_parent = inheritance_map.get(current_class)
             brace_depth = 1
@@ -972,14 +974,12 @@ def _restore_super_calls(source: str, inheritance_map: dict) -> str:
 
         if current_class is not None:
             in_string = None
-            prev_ch = None
-            for ch in stripped:
+            j = 0
+            while j < len(stripped):
+                ch = stripped[j]
                 if in_string:
                     if ch == '\\':
-                        prev_ch = ch
-                        continue
-                    if prev_ch == '\\':
-                        prev_ch = ch
+                        j += 2
                         continue
                     if ch == in_string:
                         in_string = None
@@ -990,10 +990,13 @@ def _restore_super_calls(source: str, inheritance_map: dict) -> str:
                 elif ch == '}':
                     brace_depth -= 1
                     if brace_depth == 0:
-                        current_class = None
-                        current_parent = None
+                        if class_stack:
+                            current_class, current_parent, brace_depth = class_stack.pop()
+                        else:
+                            current_class = None
+                            current_parent = None
                         break
-                prev_ch = ch
+                j += 1
 
         if current_parent and ('global.' + current_parent + '.') in line:
             line = _restore_super_in_line(line, current_parent)
@@ -1006,12 +1009,16 @@ def _count_braces_in_line(line: str) -> int:
     delta = 0
     in_str = False
     str_char = None
-    prev = None
-    for ch in line:
+    i = 0
+    while i < len(line):
+        ch = line[i]
         if in_str:
-            if prev != '\\' and ch == str_char:
+            if ch == '\\':
+                i += 2
+                continue
+            if ch == str_char:
                 in_str = False
-            prev = ch
+            i += 1
             continue
         if ch in ('"', "'"):
             in_str = True
@@ -1020,7 +1027,9 @@ def _count_braces_in_line(line: str) -> int:
             delta += 1
         elif ch == '}':
             delta -= 1
-        prev = ch
+        elif ch == '/' and i + 1 < len(line) and line[i + 1] == '/':
+            break
+        i += 1
     return delta
 
 def _merge_else_if(source: str) -> str:
@@ -1108,3 +1117,4 @@ def _merge_else_if_pass(source: str) -> str:
         i = close_idx + 1
 
     return '\n'.join(result)
+

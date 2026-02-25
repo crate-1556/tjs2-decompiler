@@ -103,6 +103,20 @@ class Expr(ABC):
     def precedence(self) -> int:
         return 100
 
+def _escape_str_literal(s: str) -> str:
+    escaped = s.replace('\\', '\\\\').replace('"', '\\"')
+    escaped = escaped.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
+    result = []
+    for ch in escaped:
+        cp = ord(ch)
+        if cp < 0x20:
+            result.append(f'\\x{cp:02X}')
+        elif 0xD800 <= cp <= 0xDFFF:
+            result.append(f'\\x{cp:04X}')
+        else:
+            result.append(ch)
+    return ''.join(result)
+
 @dataclass
 class ConstExpr(Expr):
     value: Any
@@ -113,17 +127,7 @@ class ConstExpr(Expr):
         elif isinstance(self.value, str):
             if self.value.startswith('//') and '/' in self.value[2:]:
                 return self._format_regex(self.value)
-            escaped = self.value.replace('\\', '\\\\').replace('"', '\\"')
-            escaped = escaped.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
-            result = []
-            for ch in escaped:
-                cp = ord(ch)
-                if cp < 0x20:
-                    result.append(f'\\x{cp:02X}')
-                else:
-                    result.append(ch)
-            escaped = ''.join(result)
-            return f'"{escaped}"'
+            return f'"{_escape_str_literal(self.value)}"'
         elif isinstance(self.value, bool):
             return 'true' if self.value else 'false'
         elif isinstance(self.value, float):
@@ -245,6 +249,8 @@ class BinaryExpr(Expr):
             return f'({src})'
         if isinstance(expr, AssignExpr):
             return f'({src})'
+        if isinstance(expr, (InContextOfExpr, SwapExpr)):
+            return f'({src})'
         return src
 
     def precedence(self) -> int:
@@ -276,12 +282,12 @@ class PropertyExpr(Expr):
         if isinstance(self.obj, (WithThisExpr, ThisProxyExpr)) and isinstance(self.prop, str):
             if self.prop.isidentifier() and not self.prop.startswith('%'):
                 return self.prop
-            return f'this["{self.prop}"]'
+            return f'this["{_escape_str_literal(self.prop)}"]'
 
         if isinstance(self.obj, WithDotProxy) and isinstance(self.prop, str):
             if self.prop.isidentifier() and not self.prop.startswith('%'):
                 return f'.{self.prop}'
-            return f'.["{self.prop}"]'
+            return f'.["{_escape_str_literal(self.prop)}"]'
 
         obj_src = self.obj.to_source()
         if isinstance(self.obj, (BinaryExpr, TernaryExpr, InContextOfExpr, AssignExpr, TypeofExpr, UnaryExpr, InstanceofExpr)):
@@ -290,7 +296,7 @@ class PropertyExpr(Expr):
         if isinstance(self.prop, str):
             if self.prop.isidentifier() and not self.prop.startswith('%'):
                 return f'{obj_src}.{self.prop}'
-            return f'{obj_src}["{self.prop}"]'
+            return f'{obj_src}["{_escape_str_literal(self.prop)}"]'
         else:
             return f'{obj_src}[{self.prop.to_source()}]'
 
@@ -327,13 +333,13 @@ class MethodCallExpr(Expr):
             args_src = ', '.join(self._fmt_arg(a) for a in self.args)
             if self.method.isidentifier():
                 return f'{self.method}({args_src})'
-            return f'this["{self.method}"]({args_src})'
+            return f'this["{_escape_str_literal(self.method)}"]({args_src})'
 
         if isinstance(self.obj, WithDotProxy) and isinstance(self.method, str):
             args_src = ', '.join(self._fmt_arg(a) for a in self.args)
             if self.method.isidentifier():
                 return f'.{self.method}({args_src})'
-            return f'.["{self.method}"]({args_src})'
+            return f'.["{_escape_str_literal(self.method)}"]({args_src})'
 
         obj_src = self.obj.to_source()
         if isinstance(self.obj, (BinaryExpr, TernaryExpr, InContextOfExpr, AssignExpr, TypeofExpr, UnaryExpr, InstanceofExpr)):
@@ -344,7 +350,7 @@ class MethodCallExpr(Expr):
         if isinstance(self.method, str):
             if self.method.isidentifier():
                 return f'{obj_src}.{self.method}({args_src})'
-            return f'{obj_src}["{self.method}"]({args_src})'
+            return f'{obj_src}["{_escape_str_literal(self.method)}"]({args_src})'
         else:
             return f'{obj_src}[{self.method.to_source()}]({args_src})'
 
@@ -421,7 +427,10 @@ class IsValidExpr(Expr):
     target: Expr
 
     def to_source(self) -> str:
-        return f'isvalid {self.target.to_source()}'
+        target_src = self.target.to_source()
+        if isinstance(self.target, (BinaryExpr, TernaryExpr, AssignExpr, InContextOfExpr, InstanceofExpr, CommaExpr)):
+            target_src = f'({target_src})'
+        return f'isvalid {target_src}'
 
 @dataclass
 class InstanceofExpr(Expr):
@@ -429,7 +438,13 @@ class InstanceofExpr(Expr):
     right: Expr
 
     def to_source(self) -> str:
-        return f'{self.left.to_source()} instanceof {self.right.to_source()}'
+        left_src = self.left.to_source()
+        right_src = self.right.to_source()
+        if isinstance(self.left, (TernaryExpr, AssignExpr, InContextOfExpr, CommaExpr)):
+            left_src = f'({left_src})'
+        if isinstance(self.right, (TernaryExpr, AssignExpr, InContextOfExpr, CommaExpr)):
+            right_src = f'({right_src})'
+        return f'{left_src} instanceof {right_src}'
 
 @dataclass
 class InContextOfExpr(Expr):
@@ -437,10 +452,13 @@ class InContextOfExpr(Expr):
     context: Expr
 
     def to_source(self) -> str:
+        func_src = self.func.to_source()
         ctx_src = self.context.to_source()
-        if isinstance(self.context, AssignExpr):
+        if isinstance(self.func, (BinaryExpr, TernaryExpr, AssignExpr, CommaExpr)):
+            func_src = f'({func_src})'
+        if isinstance(self.context, (BinaryExpr, TernaryExpr, AssignExpr, CommaExpr)):
             ctx_src = f'({ctx_src})'
-        return f'{self.func.to_source()} incontextof {ctx_src}'
+        return f'{func_src} incontextof {ctx_src}'
 
 @dataclass
 class SwapExpr(Expr):
@@ -469,7 +487,7 @@ class VarDeclStmt(Stmt):
 
     def to_source(self, indent: int = 0) -> str:
         prefix = '    ' * indent + f'var {self.name}'
-        if self.value:
+        if self.value is not None:
             return prefix + f' = {self.value.to_source()};'
         return prefix + ';'
 
@@ -479,7 +497,7 @@ class ReturnStmt(Stmt):
 
     def to_source(self, indent: int = 0) -> str:
         prefix = '    ' * indent + 'return'
-        if self.value:
+        if self.value is not None:
             return prefix + f' {self.value.to_source()};'
         return prefix + ';'
 
@@ -687,25 +705,28 @@ class BytecodeLoader:
         return val
 
     def load(self) -> bool:
-        if self.data[0:8] != b'TJS2100\x00':
+        try:
+            if self.data[0:8] != b'TJS2100\x00':
+                return False
+
+            self.pos = 8
+            file_size = self.read_u32()
+
+            if self.data[self.pos:self.pos+4] != b'DATA':
+                return False
+            self.pos += 4
+            data_size = self.read_u32()
+            self._read_data_area()
+
+            if self.data[self.pos:self.pos+4] != b'OBJS':
+                return False
+            self.pos += 4
+            objs_size = self.read_u32()
+            self._read_objects()
+
+            return True
+        except (struct.error, IndexError, ValueError, OverflowError):
             return False
-
-        self.pos = 8
-        file_size = self.read_u32()
-
-        if self.data[self.pos:self.pos+4] != b'DATA':
-            return False
-        self.pos += 4
-        data_size = self.read_u32()
-        self._read_data_area()
-
-        if self.data[self.pos:self.pos+4] != b'OBJS':
-            return False
-        self.pos += 4
-        objs_size = self.read_u32()
-        self._read_objects()
-
-        return True
 
     def _read_data_area(self):
         count = self.read_u32()
@@ -741,7 +762,7 @@ class BytecodeLoader:
                 chars.append(self.read_u16())
             try:
                 s = ''.join(chr(c) for c in chars)
-            except:
+            except (ValueError, OverflowError):
                 s = f'<raw:{chars}>'
             self.string_array.append(s)
             if length % 2:
@@ -968,9 +989,14 @@ class Decompiler:
 
         if self.loader.toplevel >= 0:
             top_obj = self.loader.objects[self.loader.toplevel]
-            top_stmts = self._decompile_object(top_obj)
-            for stmt in top_stmts:
-                lines.append(stmt.to_source(0))
+            try:
+                top_stmts = self._decompile_object(top_obj)
+                top_stmts = self._wrap_with_blocks(top_stmts)
+                for stmt in top_stmts:
+                    lines.append(stmt.to_source(0))
+            except Exception as e:
+                lines.append(f'/* ERROR decompiling top-level: {e} */')
+                print(f"Warning: top-level decompile failed: {e}", file=sys.stderr)
 
         for obj in self.loader.objects:
             if obj.index == self.loader.toplevel:
@@ -987,8 +1013,13 @@ class Decompiler:
                 continue
 
             lines.append('')
-            obj_src = self._decompile_object_definition(obj)
-            lines.append(obj_src)
+            try:
+                obj_src = self._decompile_object_definition(obj)
+                lines.append(obj_src)
+            except Exception as e:
+                obj_label = obj.name or f'obj#{obj.index}'
+                lines.append(f'/* ERROR decompiling {obj_label}: {e} */')
+                print(f"Warning: failed to decompile {obj_label}: {e}", file=sys.stderr)
 
         return '\n'.join(lines)
 
@@ -1125,7 +1156,7 @@ class Decompiler:
 
         if len(stmts) == 1 and isinstance(stmts[0], ReturnStmt):
             ret = stmts[0]
-            if ret.value:
+            if ret.value is not None:
                 return f'function({args_str}) {{ return {ret.value.to_source()}; }}'
             return f'function({args_str}) {{}}'
 
@@ -1153,6 +1184,7 @@ class Decompiler:
         saved_loop_context_stack = list(self.loop_context_stack) if hasattr(self, 'loop_context_stack') else []
         saved_with_cp_addrs = set(self._with_cp_addrs)
         saved_in_with = self._in_with
+        saved_parent_in_with = self._parent_in_with
         saved_pending_spie = self._pending_spie
         saved_pre_stmts = list(self._pre_stmts)
         saved_reg_splits = self._reg_splits
@@ -1187,40 +1219,43 @@ class Decompiler:
             self.local_vars[reg] = arg
             self.declared_vars.add(arg)
 
-        stmts = self._decompile_object(obj)
+        body = '    /* ERROR: anonymous function decompilation failed */\n'
+        try:
+            stmts = self._decompile_object(obj)
 
-        body_lines = []
-        for stmt in stmts:
-            body_lines.append(stmt.to_source(1))
-        body = '\n'.join(body_lines)
-
-        self.regs = saved_regs
-        self.local_vars = saved_local_vars
-        self.declared_vars = saved_declared
-        self.current_obj = saved_obj
-        self.var_counter = saved_var_counter
-        self.flag = saved_flag
-        self.flag_negated = saved_flag_negated
-        self.pending_dicts = saved_pending_dicts
-        self.pending_arrays = saved_pending_arrays
-        self.pending_counters = saved_pending_counters
-        self.loop_headers = saved_loop_headers
-        self.jump_targets = saved_jump_targets
-        self.back_edges = saved_back_edges
-        self.loop_context_stack = saved_loop_context_stack
-        self._with_cp_addrs = saved_with_cp_addrs
-        self._in_with = saved_in_with
-        self._pending_spie = saved_pending_spie
-        self._pre_stmts = saved_pre_stmts
-        self._reg_splits = saved_reg_splits
-        self._split_var_names = saved_split_var_names
-        self._current_addr = saved_current_addr
-        self._switch_break_stack = saved_switch_break_stack
-        self._for_loop_update_addr = saved_for_loop_update_addr
-        self._for_loop_skip_tail_bid = saved_for_loop_skip_tail_bid
-        self._side_effect_multi_read_addrs = saved_side_effect_addrs
-        self._callexpr_temp_cp_addrs = saved_callexpr_temp_cp
-        self._dead_gpd_addrs = saved_dead_gpd_addrs
+            body_lines = []
+            for stmt in stmts:
+                body_lines.append(stmt.to_source(1))
+            body = '\n'.join(body_lines)
+        finally:
+            self.regs = saved_regs
+            self.local_vars = saved_local_vars
+            self.declared_vars = saved_declared
+            self.current_obj = saved_obj
+            self.var_counter = saved_var_counter
+            self.flag = saved_flag
+            self.flag_negated = saved_flag_negated
+            self.pending_dicts = saved_pending_dicts
+            self.pending_arrays = saved_pending_arrays
+            self.pending_counters = saved_pending_counters
+            self.loop_headers = saved_loop_headers
+            self.jump_targets = saved_jump_targets
+            self.back_edges = saved_back_edges
+            self.loop_context_stack = saved_loop_context_stack
+            self._with_cp_addrs = saved_with_cp_addrs
+            self._in_with = saved_in_with
+            self._parent_in_with = saved_parent_in_with
+            self._pending_spie = saved_pending_spie
+            self._pre_stmts = saved_pre_stmts
+            self._reg_splits = saved_reg_splits
+            self._split_var_names = saved_split_var_names
+            self._current_addr = saved_current_addr
+            self._switch_break_stack = saved_switch_break_stack
+            self._for_loop_update_addr = saved_for_loop_update_addr
+            self._for_loop_skip_tail_bid = saved_for_loop_skip_tail_bid
+            self._side_effect_multi_read_addrs = saved_side_effect_addrs
+            self._callexpr_temp_cp_addrs = saved_callexpr_temp_cp
+            self._dead_gpd_addrs = saved_dead_gpd_addrs
 
         return AnonFuncExpr(args, body)
 
@@ -1349,6 +1384,12 @@ class Decompiler:
         self._for_loop_update_addr = None
         self._for_loop_skip_tail_bid = None
         self._side_effect_multi_read_addrs = set()
+        self._callexpr_temp_cp_addrs = set()
+        self._dead_gpd_addrs = set()
+        self.loop_headers = {}
+        self.jump_targets = {}
+        self.back_edges = set()
+        self.loop_context_stack = []
 
     def _detect_with_blocks(self, instructions: List[Instruction]):
         self._with_cp_addrs = set()
@@ -1518,10 +1559,12 @@ class Decompiler:
             if dest <= 0:
                 continue
             read_count = 0
+            block_terminator_op = None
             _container_set_ops = (VM.SPI, VM.SPIS, VM.SPIE)
             for j in range(i + 1, len(instructions)):
                 nxt = instructions[j]
                 if nxt.op in (VM.JMP, VM.JF, VM.JNF, VM.RET, VM.THROW):
+                    block_terminator_op = nxt.op
                     break
                 read_regs = _get_read_regs(nxt)
                 if dest in read_regs:
@@ -1601,6 +1644,12 @@ class Decompiler:
                                 _cond_cmp_ops = (VM.CEQ, VM.CDEQ, VM.CLT, VM.CGT,
                                                  VM.TT, VM.TF)
                                 if nxt.op in _cond_cmp_ops:
+                                    skip = True
+                                elif (block_terminator_op in (VM.JF, VM.JNF) and
+                                      nxt.op in (VM.CALLD, VM.GPD, VM.GPDS,
+                                                 VM.GPI, VM.GPIS) and
+                                      len(nxt.operands) >= 2 and
+                                      nxt.operands[1] == dest):
                                     skip = True
                             else:
                                 if (nxt.op == VM.CP and len(nxt.operands) >= 2 and
@@ -4510,6 +4559,7 @@ class Decompiler:
             r = ops[0]
             return ExprStmt(UnaryExpr('!', get_reg(r), prefix=False))
 
+        print(f"Warning: Unknown opcode {op} at addr {instr.addr}", file=sys.stderr)
         return None
 
     def _parse_call_args(self, ops: List[int], start_idx: int, argc: int) -> List[Expr]:
@@ -4596,9 +4646,12 @@ class Decompiler:
 
         elif op in (VM.INC, VM.DEC, VM.ASC, VM.CHR, VM.NUM, VM.INT,
                     VM.REAL, VM.STR, VM.OCTET, VM.LNOT, VM.BNOT, VM.CHS,
-                    VM.CHKINS, VM.INV, VM.CHKINV):
+                    VM.TYPEOF, VM.INV, VM.CHKINV):
             if nops >= 1:
                 add_def(ops[0]); add_use(ops[0])
+        elif op == VM.CHKINS:
+            if nops >= 2:
+                add_def(ops[0]); add_use(ops[0]); add_use(ops[1])
 
         elif op == VM.CP:
             if nops >= 2:
@@ -4729,7 +4782,7 @@ class Decompiler:
                         if 3 + i < nops:
                             add_use(ops[3 + i])
 
-        elif op in (VM.TYPEOF, VM.TYPEOFD):
+        elif op == VM.TYPEOFD:
             if nops >= 2:
                 add_def(ops[0]); add_use(ops[1])
         elif op == VM.TYPEOFI:
@@ -5144,8 +5197,12 @@ def is_tjs2_bytecode(filepath):
         return False
 
 def decompile_file(input_path, output_path=None, disasm=False, info=False, obj_idx=None):
-    with open(input_path, 'rb') as f:
-        data = f.read()
+    try:
+        with open(input_path, 'rb') as f:
+            data = f.read()
+    except (OSError, IOError) as e:
+        print(f"Error: Cannot read file: {input_path} ({e})", file=sys.stderr)
+        return False
 
     loader = BytecodeLoader(data)
     if not loader.load():
