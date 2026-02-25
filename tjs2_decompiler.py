@@ -5345,7 +5345,7 @@ def is_tjs2_bytecode(filepath):
     except (OSError, IOError):
         return False
 
-def decompile_file(input_path, output_path=None, disasm=False, info=False, obj_idx=None):
+def decompile_file(input_path, output_path=None, disasm=False, info=False, obj_idx=None, encoding='utf-8'):
     try:
         with open(input_path, 'rb') as f:
             data = f.read()
@@ -5391,13 +5391,24 @@ def decompile_file(input_path, output_path=None, disasm=False, info=False, obj_i
 
     if output_path:
         os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(source)
+        enc = encoding.lower().replace('-', '').replace('_', '')
+        if enc == 'utf16lebom':
+            with open(output_path, 'wb') as f:
+                f.write(b'\xff\xfe')
+                f.write(source.encode('utf-16-le'))
+        elif enc == 'utf8bom':
+            with open(output_path, 'wb') as f:
+                f.write(b'\xef\xbb\xbf')
+                f.write(source.encode('utf-8'))
+        else:
+            codec = {'shiftjis': 'shift_jis', 'sjis': 'shift_jis', 'gbk': 'gbk', 'utf8': 'utf-8'}.get(enc, encoding)
+            with open(output_path, 'w', encoding=codec) as f:
+                f.write(source)
     else:
         print(source)
     return True
 
-def decompile_directory(input_dir, output_dir, recursive=False):
+def decompile_directory(input_dir, output_dir, recursive=False, flat=False, encoding='utf-8'):
     input_path = pathlib.Path(input_dir)
     output_path = pathlib.Path(output_dir)
 
@@ -5405,7 +5416,7 @@ def decompile_directory(input_dir, output_dir, recursive=False):
         print(f"Error: {input_dir} is not a directory", file=sys.stderr)
         sys.exit(1)
 
-    pattern = '**/*' if recursive else '*'
+    pattern = '**/*' if (recursive or flat) else '*'
     files = [f for f in input_path.glob(pattern) if f.is_file() and is_tjs2_bytecode(f)]
 
     if not files:
@@ -5414,11 +5425,23 @@ def decompile_directory(input_dir, output_dir, recursive=False):
 
     ok = 0
     fail = 0
+    seen_names = {}
     for filepath in sorted(files):
         rel = filepath.relative_to(input_path)
-        out_file = output_path / rel
+        if flat:
+            name = filepath.name
+            if name in seen_names:
+                seen_names[name] += 1
+                stem = filepath.stem
+                suffix = filepath.suffix
+                name = f"{stem}_{seen_names[name]}{suffix}"
+            else:
+                seen_names[name] = 0
+            out_file = output_path / name
+        else:
+            out_file = output_path / rel
         try:
-            if decompile_file(str(filepath), str(out_file)):
+            if decompile_file(str(filepath), str(out_file), encoding=encoding):
                 print(f"  OK: {rel}")
                 ok += 1
             else:
@@ -5435,6 +5458,10 @@ def main():
     parser.add_argument('input', help='Input bytecode file or directory')
     parser.add_argument('-o', '--output', help='Output file or directory')
     parser.add_argument('-r', '--recursive', action='store_true', help='Recursively decompile directory')
+    parser.add_argument('-f', '--flat', action='store_true', help='Recursively search but output all files into a single flat directory')
+    parser.add_argument('-e', '--encoding', default='utf-8',
+                        choices=['utf-8', 'utf-8-bom', 'utf-16le-bom', 'shift_jis', 'gbk'],
+                        help='Output file encoding (default: utf-8)')
     parser.add_argument('-i', '--info', action='store_true', help='Show file info')
     parser.add_argument('-d', '--disasm', action='store_true', help='Disassemble only')
     parser.add_argument('--obj', type=int, help='Object index to disassemble')
@@ -5444,11 +5471,11 @@ def main():
         if not args.output:
             print("Error: -o <output_dir> is required for directory mode", file=sys.stderr)
             sys.exit(1)
-        decompile_directory(args.input, args.output, recursive=args.recursive)
+        decompile_directory(args.input, args.output, recursive=args.recursive, flat=args.flat, encoding=args.encoding)
         return
 
     if not decompile_file(args.input, args.output, disasm=args.disasm, info=args.info,
-                          obj_idx=args.obj):
+                          obj_idx=args.obj, encoding=args.encoding):
         sys.exit(1)
 
 if __name__ == '__main__':
