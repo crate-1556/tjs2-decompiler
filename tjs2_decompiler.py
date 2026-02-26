@@ -5532,7 +5532,7 @@ def is_tjs2_bytecode(filepath):
     except (OSError, IOError):
         return False
 
-def decompile_file(input_path, output_path=None, disasm=False, info=False, obj_idx=None, encoding='utf-8'):
+def decompile_file(input_path, output_path=None, disasm=False, info=False, obj_idx=None, encoding='utf-16le-bom'):
     try:
         with open(input_path, 'rb') as f:
             data = f.read()
@@ -5595,7 +5595,7 @@ def decompile_file(input_path, output_path=None, disasm=False, info=False, obj_i
         print(source)
     return True
 
-def decompile_directory(input_dir, output_dir, recursive=False, flat=False, encoding='utf-8'):
+def decompile_directory(input_dir, output_dir, recursive=False, flat=False, encoding='utf-16le-bom'):
     input_path = pathlib.Path(input_dir)
     output_path = pathlib.Path(output_dir)
 
