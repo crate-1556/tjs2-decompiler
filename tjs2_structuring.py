@@ -7,7 +7,7 @@ from typing import List, Dict, Optional, Set, Tuple, Any
 from tjs2_decompiler import (
     VM, Instruction, CodeObject, Expr, Stmt, ConstExpr, VarExpr, VoidExpr,
     BinaryExpr, UnaryExpr, TernaryExpr, AssignExpr, PropertyExpr,
-    CallExpr, MethodCallExpr, CommaExpr,
+    CallExpr, MethodCallExpr, CommaExpr, TypeofExpr, IsValidExpr,
     ArrayExpr, DictExpr,
     ExprStmt, VarDeclStmt, IfStmt, WhileStmt, DoWhileStmt, ForStmt, TryStmt,
     BreakStmt, ContinueStmt, ReturnStmt, SwapExpr, SwitchStmt,
@@ -550,6 +550,7 @@ def _detect_condition_chain(cfg: CFG, start_block_id: int, instructions: List[In
             if instr.op == VM.CP and len(instr.operands) >= 2 and instr.operands[0] < -2:
                 src_reg = instr.operands[1]
                 is_assign_in_cond = False
+                dest_local = instr.operands[0]
                 for j in range(idx + 1, block.end_idx):
                     later = instructions[j]
                     if later.op in (VM.CDEQ, VM.CEQ, VM.CLT, VM.CGT):
@@ -562,6 +563,11 @@ def _detect_condition_chain(cfg: CFG, start_block_id: int, instructions: List[In
                             and later.op not in (VM.CDEQ, VM.CEQ, VM.CLT, VM.CGT,
                                                   VM.TT, VM.TF, VM.NF,
                                                   VM.JF, VM.JNF, VM.JMP)):
+                        if (later.op == VM.CP and len(later.operands) >= 2
+                                and later.operands[1] == dest_local):
+                            continue
+                        if later.op == VM.TYPEOF:
+                            continue
                         break
                 if not is_assign_in_cond:
                     for j2 in range(idx + 1, block.end_idx):
@@ -2651,6 +2657,28 @@ def _process_condition_block_preamble(
                 deferred_side_effects.append((len(preamble_stmts), instr.addr, stmt))
             pi += 1
             continue
+        if (instr.op == VM.CP and len(instr.operands) >= 2
+                and instr.operands[0] >= 0 and instr.operands[1] < -2
+                and pi > start_idx and pi + 1 < preamble_end_idx):
+            prev = instructions[pi - 1]
+            next_instr = instructions[pi + 1]
+            if (prev.op == VM.CP and len(prev.operands) >= 2
+                    and prev.operands[0] == instr.operands[1]
+                    and prev.operands[1] == instr.operands[0]
+                    and next_instr.op in (VM.TYPEOF, VM.CHKINV)
+                    and next_instr.operands[0] == instr.operands[0]):
+                temp_reg = instr.operands[0]
+                has_prior_write = False
+                for scan_i in range(start_idx, pi - 1):
+                    scan_instr = instructions[scan_i]
+                    if (scan_instr.operands and scan_instr.operands[0] == temp_reg
+                            and scan_instr.op != VM.JF and scan_instr.op != VM.JNF
+                            and scan_instr.op != VM.JMP):
+                        has_prior_write = True
+                        break
+                if has_prior_write:
+                    pi += 1
+                    continue
         swap_result = decompiler._try_detect_swap(instructions, obj, pi, preamble_end_idx)
         if swap_result:
             preamble_stmts.append(swap_result['stmt'])
@@ -2747,6 +2775,16 @@ def _embed_assign_in_expr_tree(expr: Expr, target_value: Expr,
                 return True
             if _embed_assign_in_expr_tree(child, target_value, assign_expr):
                 return True
+    elif isinstance(expr, TypeofExpr):
+        if expr.target is target_value:
+            expr.target = assign_expr
+            return True
+        return _embed_assign_in_expr_tree(expr.target, target_value, assign_expr)
+    elif isinstance(expr, IsValidExpr):
+        if expr.target is target_value:
+            expr.target = assign_expr
+            return True
+        return _embed_assign_in_expr_tree(expr.target, target_value, assign_expr)
     return False
 
 def _detect_assignment_in_condition(preamble_stmts: List[Stmt], cond: Expr,

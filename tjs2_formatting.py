@@ -898,7 +898,7 @@ def _restore_extends(source: str) -> tuple:
 
         if j < len(lines):
             next_line = lines[j].strip()
-            em = re.match(r'^\((\w+)\s+incontextof\s+this\)\(\)\s*;?\s*$', next_line)
+            em = re.match(r'^\((?:global\.)?(\w+)\s+incontextof\s+this\)\(\)\s*;?\s*$', next_line)
             if em:
                 parent_name = em.group(1)
                 inheritance_map[class_name] = parent_name

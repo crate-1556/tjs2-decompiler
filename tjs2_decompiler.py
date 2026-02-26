@@ -418,7 +418,7 @@ class TypeofExpr(Expr):
 
     def to_source(self) -> str:
         target_src = self.target.to_source()
-        if isinstance(self.target, (BinaryExpr, TernaryExpr, InContextOfExpr)):
+        if isinstance(self.target, (BinaryExpr, TernaryExpr, InContextOfExpr, AssignExpr)):
             target_src = f'({target_src})'
         return f'typeof {target_src}'
 
@@ -648,6 +648,14 @@ class SwitchStmt(Stmt):
                 lines.append(stmt.to_source(indent + 2))
         lines.append(f'{prefix}}}')
         return '\n'.join(lines)
+
+@dataclass
+class FuncDeclStmt(Stmt):
+    source_text: str
+
+    def to_source(self, indent=0) -> str:
+        prefix = '    ' * indent
+        return '\n'.join(prefix + line for line in self.source_text.split('\n'))
 
 class BytecodeLoader:
 
@@ -997,6 +1005,12 @@ class Decompiler:
                         self._func_children_at_top.add(d[1])
                     else:
                         break
+        self._func_child_by_obj_index = {}
+        for children in self._func_children.values():
+            for child in children:
+                self._func_child_by_obj_index[child.index] = child
+        self._inline_emitted_children = set()
+
         func_prop_indices = {obj.index for obj in self.loader.objects
                              if obj.context_type == ContextType.PROPERTY and obj.parent in func_indices}
 
@@ -1014,17 +1028,49 @@ class Decompiler:
             if obj.parent in func_prop_indices:
                 handled_by_parent.add(obj.index)
 
+        top_level_children_at_top = set()
+        top_level_children_at_top_ordered = []
+        if self.loader.toplevel >= 0:
+            top_obj = self.loader.objects[self.loader.toplevel]
+            top_children_set = set()
+            for obj in self.loader.objects:
+                if (obj.parent == top_obj.index and obj.index != top_obj.index
+                        and obj.context_type in (ContextType.FUNCTION, ContextType.CLASS)):
+                    top_children_set.add(obj.index)
+
+            instrs = decode_instructions(top_obj.code)
+            i = 0
+            while i < len(instrs):
+                instr = instrs[i]
+                if instr.op == VM.CONST and len(instr.operands) >= 2:
+                    data_idx = instr.operands[1]
+                    val = top_obj.data[data_idx] if 0 <= data_idx < len(top_obj.data) else None
+                    if isinstance(val, tuple) and len(val) == 2 and val[0] == 'inter_object' and val[1] in top_children_set:
+                        child_idx = val[1]
+                        j = i + 1
+                        if j < len(instrs) and instrs[j].op == VM.CHGTHIS:
+                            j += 1
+                        if j < len(instrs) and instrs[j].op == VM.SPDS and instrs[j].operands[0] == -1:
+                            if child_idx not in top_level_children_at_top:
+                                top_level_children_at_top.add(child_idx)
+                                top_level_children_at_top_ordered.append(child_idx)
+                            i = j + 1
+                            continue
+                break
+
+        top_lines = []
         if self.loader.toplevel >= 0:
             top_obj = self.loader.objects[self.loader.toplevel]
             try:
                 top_stmts = self._decompile_object(top_obj)
                 top_stmts = self._wrap_with_blocks(top_stmts)
                 for stmt in top_stmts:
-                    lines.append(stmt.to_source(0))
+                    top_lines.append(stmt.to_source(0))
             except Exception as e:
-                lines.append(f'/* ERROR decompiling top-level: {e} */')
+                top_lines.append(f'/* ERROR decompiling top-level: {e} */')
                 print(f"Warning: top-level decompile failed: {e}", file=sys.stderr)
 
+        child_output = {}
         for obj in self.loader.objects:
             if obj.index == self.loader.toplevel:
                 continue
@@ -1039,14 +1085,24 @@ class Decompiler:
             if obj.context_type == ContextType.EXPR_FUNCTION:
                 continue
 
-            lines.append('')
+            obj_lines = []
             try:
                 obj_src = self._decompile_object_definition(obj)
-                lines.append(obj_src)
+                obj_lines.append('')
+                obj_lines.append(obj_src)
             except Exception as e:
                 obj_label = obj.name or f'obj#{obj.index}'
-                lines.append(f'/* ERROR decompiling {obj_label}: {e} */')
+                obj_lines.append(f'/* ERROR decompiling {obj_label}: {e} */')
                 print(f"Warning: failed to decompile {obj_label}: {e}", file=sys.stderr)
+            child_output[obj.index] = obj_lines
+
+        for child_idx in top_level_children_at_top_ordered:
+            if child_idx in child_output:
+                lines.extend(child_output[child_idx])
+        lines.extend(top_lines)
+        for obj in self.loader.objects:
+            if obj.index in child_output and obj.index not in top_level_children_at_top:
+                lines.extend(child_output[obj.index])
 
         return '\n'.join(lines)
 
@@ -1137,11 +1193,15 @@ class Decompiler:
                 return [body for _, body in stmt.cases]
             return []
 
-        def _direct_var_decls(body):
+        def _all_var_decls(body):
             names = set()
             for s in body:
                 if isinstance(s, VarDeclStmt):
                     names.add(s.name)
+                if isinstance(s, ForStmt) and isinstance(s.init, VarDeclStmt):
+                    names.add(s.init.name)
+                for child_body in _get_child_bodies(s):
+                    names.update(_all_var_decls(child_body))
             return names
 
         def _all_var_refs(stmts_list):
@@ -1178,7 +1238,7 @@ class Decompiler:
                 continue
             inner_decls = set()
             for body in bodies:
-                inner_decls.update(_direct_var_decls(body))
+                inner_decls.update(_all_var_decls(body))
             if not inner_decls:
                 continue
             if i + 1 < len(stmts):
@@ -1186,7 +1246,7 @@ class Decompiler:
                 hoisted.update(inner_decls & remaining_refs)
             if len(bodies) >= 2:
                 for bi, body in enumerate(bodies):
-                    decls_here = _direct_var_decls(body)
+                    decls_here = _all_var_decls(body)
                     for bj, other_body in enumerate(bodies):
                         if bi != bj and other_body:
                             other_refs = _all_var_refs(other_body)
@@ -1235,7 +1295,9 @@ class Decompiler:
 
         func_children = getattr(self, '_func_children', {}).get(obj.index, [])
         top_children = [c for c in func_children if c.index in self._func_children_at_top]
-        bottom_children = [c for c in func_children if c.index not in self._func_children_at_top]
+        bottom_children = [c for c in func_children
+                          if c.index not in self._func_children_at_top
+                          and c.index not in self._inline_emitted_children]
 
         def _emit_children(child_list):
             result = []
@@ -1336,6 +1398,8 @@ class Decompiler:
         saved_side_effect_addrs = set(self._side_effect_multi_read_addrs)
         saved_callexpr_temp_cp = set(self._callexpr_temp_cp_addrs) if hasattr(self, '_callexpr_temp_cp_addrs') else set()
         saved_dead_gpd_addrs = set(self._dead_gpd_addrs)
+        saved_pending_func_decl = self._pending_func_decl_obj_idx
+        saved_inline_emitted = set(self._inline_emitted_children)
 
         self._reset_state()
         self.current_obj = obj
@@ -1362,6 +1426,12 @@ class Decompiler:
         body = '    /* ERROR: anonymous function decompilation failed */\n'
         try:
             stmts = self._decompile_object(obj)
+
+            stmts = self._wrap_with_blocks(stmts)
+
+            stmts = self._hoist_cross_scope_vars(stmts)
+
+            stmts = self._prepend_context_var_decls(obj, stmts)
 
             body_lines = []
             for stmt in stmts:
@@ -1396,8 +1466,79 @@ class Decompiler:
             self._side_effect_multi_read_addrs = saved_side_effect_addrs
             self._callexpr_temp_cp_addrs = saved_callexpr_temp_cp
             self._dead_gpd_addrs = saved_dead_gpd_addrs
+            self._pending_func_decl_obj_idx = saved_pending_func_decl
+            self._inline_emitted_children = saved_inline_emitted
 
         return AnonFuncExpr(args, body)
+
+    def _decompile_inline_func_decl(self, child_obj: 'CodeObject') -> str:
+        saved_regs = dict(self.regs)
+        saved_local_vars = dict(self.local_vars)
+        saved_declared = set(self.declared_vars)
+        saved_obj = self.current_obj
+        saved_var_counter = self.var_counter
+        saved_flag = self.flag
+        saved_flag_negated = self.flag_negated
+        saved_pending_dicts = dict(self.pending_dicts)
+        saved_pending_arrays = dict(self.pending_arrays)
+        saved_pending_counters = set(self.pending_counters)
+        saved_loop_headers = dict(self.loop_headers) if hasattr(self, 'loop_headers') else {}
+        saved_jump_targets = dict(self.jump_targets) if hasattr(self, 'jump_targets') else {}
+        saved_back_edges = set(self.back_edges) if hasattr(self, 'back_edges') else set()
+        saved_loop_context_stack = list(self.loop_context_stack) if hasattr(self, 'loop_context_stack') else []
+        saved_with_cp_addrs = set(self._with_cp_addrs)
+        saved_in_with = self._in_with
+        saved_parent_in_with = self._parent_in_with
+        saved_pending_spie = self._pending_spie
+        saved_pre_stmts = list(self._pre_stmts)
+        saved_reg_splits = self._reg_splits
+        saved_split_var_names = dict(self._split_var_names)
+        saved_current_addr = self._current_addr
+        saved_switch_break_stack = list(self._switch_break_stack)
+        saved_for_loop_update_addr = self._for_loop_update_addr
+        saved_for_loop_skip_tail_bid = self._for_loop_skip_tail_bid
+        saved_side_effect_addrs = set(self._side_effect_multi_read_addrs)
+        saved_callexpr_temp_cp = set(self._callexpr_temp_cp_addrs) if hasattr(self, '_callexpr_temp_cp_addrs') else set()
+        saved_dead_gpd_addrs = set(self._dead_gpd_addrs)
+        saved_pending_func_decl = self._pending_func_decl_obj_idx
+        saved_inline_emitted = set(self._inline_emitted_children)
+
+        result = '/* ERROR: inline function decompilation failed */'
+        try:
+            result = self._decompile_object_definition(child_obj)
+        finally:
+            self.regs = saved_regs
+            self.local_vars = saved_local_vars
+            self.declared_vars = saved_declared
+            self.current_obj = saved_obj
+            self.var_counter = saved_var_counter
+            self.flag = saved_flag
+            self.flag_negated = saved_flag_negated
+            self.pending_dicts = saved_pending_dicts
+            self.pending_arrays = saved_pending_arrays
+            self.pending_counters = saved_pending_counters
+            self.loop_headers = saved_loop_headers
+            self.jump_targets = saved_jump_targets
+            self.back_edges = saved_back_edges
+            self.loop_context_stack = saved_loop_context_stack
+            self._with_cp_addrs = saved_with_cp_addrs
+            self._in_with = saved_in_with
+            self._parent_in_with = saved_parent_in_with
+            self._pending_spie = saved_pending_spie
+            self._pre_stmts = saved_pre_stmts
+            self._reg_splits = saved_reg_splits
+            self._split_var_names = saved_split_var_names
+            self._current_addr = saved_current_addr
+            self._switch_break_stack = saved_switch_break_stack
+            self._for_loop_update_addr = saved_for_loop_update_addr
+            self._for_loop_skip_tail_bid = saved_for_loop_skip_tail_bid
+            self._side_effect_multi_read_addrs = saved_side_effect_addrs
+            self._callexpr_temp_cp_addrs = saved_callexpr_temp_cp
+            self._dead_gpd_addrs = saved_dead_gpd_addrs
+            self._pending_func_decl_obj_idx = saved_pending_func_decl
+            self._inline_emitted_children = saved_inline_emitted
+
+        return result
 
     def _decompile_class(self, obj: CodeObject, indent: int = 0) -> str:
         prefix = '    ' * indent
@@ -1436,10 +1577,33 @@ class Decompiler:
                     self.declared_vars.add(arg)
                 body_stmts = self._decompile_object(child_obj)
                 body_stmts = self._wrap_with_blocks(body_stmts)
+                body_stmts = self._hoist_cross_scope_vars(body_stmts)
                 body_stmts = self._prepend_context_var_decls(child_obj, body_stmts)
                 lines.append(f'{inner}function {child_obj.name}({", ".join(args)}) {{')
+                method_fc = getattr(self, '_func_children', {}).get(child_obj.index, [])
+                method_top = [c for c in method_fc if c.index in self._func_children_at_top]
+                method_bottom = [c for c in method_fc
+                                 if c.index not in self._func_children_at_top
+                                 and c.index not in self._inline_emitted_children]
+                inner2 = '    ' * (indent + 2)
+                for fc in method_top:
+                    lines.append('')
+                    try:
+                        fc_src = self._decompile_object_definition(fc)
+                        for fline in fc_src.split('\n'):
+                            lines.append(inner2 + fline)
+                    except Exception as e:
+                        lines.append(f'{inner2}/* ERROR decompiling {fc.name}: {e} */')
                 for stmt in body_stmts:
                     lines.append(stmt.to_source(indent + 2))
+                for fc in method_bottom:
+                    lines.append('')
+                    try:
+                        fc_src = self._decompile_object_definition(fc)
+                        for fline in fc_src.split('\n'):
+                            lines.append(inner2 + fline)
+                    except Exception as e:
+                        lines.append(f'{inner2}/* ERROR decompiling {fc.name}: {e} */')
                 lines.append(f'{inner}}}')
             elif child_obj.context_type == ContextType.PROPERTY:
                 lines.append(self._decompile_property(child_obj, indent=indent + 1))
@@ -1459,6 +1623,7 @@ class Decompiler:
             self.current_obj = getter_obj
             getter_stmts = self._decompile_object(getter_obj)
             getter_stmts = self._wrap_with_blocks(getter_stmts)
+            getter_stmts = self._hoist_cross_scope_vars(getter_stmts)
             lines.append(f'{prefix}    getter() {{')
             for stmt in getter_stmts:
                 lines.append(stmt.to_source(indent + 2))
@@ -1476,6 +1641,7 @@ class Decompiler:
                 self.declared_vars.add(arg)
             setter_stmts = self._decompile_object(setter_obj)
             setter_stmts = self._wrap_with_blocks(setter_stmts)
+            setter_stmts = self._hoist_cross_scope_vars(setter_stmts)
             lines.append(f'{prefix}    setter({", ".join(args)}) {{')
             for stmt in setter_stmts:
                 lines.append(stmt.to_source(indent + 2))
@@ -1524,6 +1690,7 @@ class Decompiler:
         self._for_loop_update_addr = None
         self._for_loop_skip_tail_bid = None
         self._side_effect_multi_read_addrs = set()
+        self._pending_func_decl_obj_idx = None
         self._callexpr_temp_cp_addrs = set()
         self._dead_gpd_addrs = set()
         self.loop_headers = {}
@@ -3956,6 +4123,8 @@ class Decompiler:
 
     def _translate_instruction(self, instr: Instruction, obj: CodeObject) -> Optional[Stmt]:
         self._current_addr = instr.addr
+        if self._pending_func_decl_obj_idx is not None and instr.op != VM.CP:
+            self._pending_func_decl_obj_idx = None
         if self._pending_spie is not None:
             pending = self._pending_spie
             op_check = instr.op
@@ -4109,6 +4278,9 @@ class Decompiler:
                         ref_obj = self.loader.objects[obj_idx]
                         if ref_obj.context_type == 2:
                             return self._decompile_anon_func(ref_obj)
+                        if (obj_idx in self._func_child_by_obj_index
+                                and obj_idx not in self._func_children_at_top):
+                            self._pending_func_decl_obj_idx = obj_idx
                     return FuncRefExpr(obj_idx, self.loader)
             return ConstExpr(val)
 
@@ -4192,6 +4364,21 @@ class Decompiler:
                 set_reg(r1, VarExpr(name))
                 self.declared_vars.add(name)
                 return VarDeclStmt(name, src)
+
+            if self._pending_func_decl_obj_idx is not None:
+                obj_idx = self._pending_func_decl_obj_idx
+                self._pending_func_decl_obj_idx = None
+                if obj_idx in self._func_child_by_obj_index:
+                    child_obj = self._func_child_by_obj_index[obj_idx]
+                    func_name = child_obj.name or f'_func{obj_idx}'
+                    set_reg(r1, VarExpr(func_name))
+                    if r1 < -2:
+                        self.local_vars[r1] = func_name
+                        self.declared_vars.add(func_name)
+                    set_reg(r2, VarExpr(func_name))
+                    self._inline_emitted_children.add(obj_idx)
+                    defn_text = self._decompile_inline_func_decl(child_obj)
+                    return FuncDeclStmt(defn_text)
 
             if r1 < -2:
                 name = self._get_local_name(r1)
@@ -5459,11 +5646,11 @@ def main():
     parser.add_argument('-o', '--output', help='Output file or directory')
     parser.add_argument('-r', '--recursive', action='store_true', help='Recursively decompile directory')
     parser.add_argument('-f', '--flat', action='store_true', help='Recursively search but output all files into a single flat directory')
-    parser.add_argument('-e', '--encoding', default='utf-8',
-                        choices=['utf-8', 'utf-8-bom', 'utf-16le-bom', 'shift_jis', 'gbk'],
-                        help='Output file encoding (default: utf-8)')
     parser.add_argument('-i', '--info', action='store_true', help='Show file info')
     parser.add_argument('-d', '--disasm', action='store_true', help='Disassemble only')
+    parser.add_argument('-e', '--encoding', default='utf-16le-bom',
+                        choices=['utf-8', 'utf-8-bom', 'utf-16le-bom', 'shift_jis', 'gbk'],
+                        help='Output file encoding (default: utf-16le-bom)')
     parser.add_argument('--obj', type=int, help='Object index to disassemble')
     args = parser.parse_args()
 

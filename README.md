@@ -19,7 +19,7 @@ python3 tjs2_decompiler.py input_dir/ -r -o output_dir/
 # Directory (recursive flat) / 递归反编译（输出到同一目录，不保留子目录结构）
 python3 tjs2_decompiler.py input_dir/ -f -o output_dir/
 
-# Specify output encoding / 指定输出编码（默认 utf-8）
+# Specify output encoding / 指定输出编码（默认 utf-16le-bom）
 python3 tjs2_decompiler.py input.tjs -o output.tjs -e utf-16le-bom
 # Supported: utf-8, utf-8-bom, utf-16le-bom, shift_jis, gbk
 
