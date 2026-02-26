@@ -374,3 +374,5 @@ This decompiler has been verified to cover all bytecode patterns the compiler ca
 - [x] [Krkr2Compat](https://github.com/krkrz/Krkr2Compat)
 - [x] [KAGEX3/system](https://github.com/krkrz/krkr2/tree/master/kirikiri2/branches/kag3ex3/template/system) 
 - [x] All script files of a complete game / 一部游戏的全部脚本资源
+
+**NOTE**: 基于TJS2语言特性与运行测试DEBUG中，待更新。
