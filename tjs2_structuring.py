@@ -76,6 +76,19 @@ class Region:
     catch_block: Optional[int] = None
     exception_reg: Optional[int] = None
 
+_DOWHILE_COND_PREAMBLE_OPS = frozenset({
+    VM.CONST, VM.CP, VM.CL, VM.CCL,
+    VM.GPD, VM.GPI, VM.GPDS, VM.GPIS, VM.GLOBAL,
+    VM.ADD, VM.SUB, VM.MUL, VM.DIV, VM.MOD, VM.IDIV,
+    VM.BAND, VM.BOR, VM.BXOR, VM.SAR, VM.SAL, VM.SR,
+    VM.TYPEOF, VM.TYPEOFD, VM.TYPEOFI,
+    VM.CHKINV, VM.CHKINS,
+    VM.INT, VM.REAL, VM.STR,
+    VM.LNOT, VM.CHS, VM.NUM, VM.BNOT, VM.ASC, VM.CHR,
+    VM.CALL, VM.CALLD, VM.CALLI, VM.NEW,
+    VM.CHGTHIS,
+})
+
 def _block_dominates(cfg: CFG, a: int, b: int) -> bool:
     if a == b:
         return True
@@ -306,11 +319,15 @@ def _classify_loop(cfg: CFG, instructions: List[Instruction],
                 VM.CEQ, VM.CDEQ, VM.CLT, VM.CGT, VM.SETF, VM.SETNF,
                 VM.TT, VM.TF, VM.NF,
                 VM.JF, VM.JNF, VM.JMP,
-                VM.CALLD, VM.CALLI, VM.CALL,
-                VM.GPD, VM.GPDS, VM.GPI, VM.GPIS,
-                VM.ADD, VM.SUB, VM.MUL, VM.DIV,
+                VM.CALLD, VM.CALLI, VM.CALL, VM.NEW,
+                VM.GPD, VM.GPDS, VM.GPI, VM.GPIS, VM.GLOBAL,
+                VM.ADD, VM.SUB, VM.MUL, VM.DIV, VM.MOD, VM.IDIV,
+                VM.BAND, VM.BOR, VM.BXOR, VM.SAR, VM.SAL, VM.SR,
                 VM.TYPEOF, VM.TYPEOFD, VM.TYPEOFI,
-                VM.CHKINS,
+                VM.CHKINS, VM.CHKINV,
+                VM.INT, VM.REAL, VM.STR,
+                VM.LNOT, VM.CHS, VM.NUM, VM.BNOT,
+                VM.CHGTHIS,
             })
             visited_chain = set()
             chain_queue = [header]
@@ -1502,6 +1519,26 @@ def _find_switch_end(cfg: CFG, instructions: List[Instruction],
             if bridge_candidates:
                 exit_end_addr = max(bridge_candidates,
                                     key=lambda t: (bridge_candidates[t], -t))
+            else:
+                if default_or_end_addr in break_targets:
+                    has_backward_jmp_to_doa = False
+                    for bid in all_block_ids:
+                        b = cfg.get_block(bid)
+                        if b is None:
+                            continue
+                        block_addr = instructions[b.start_idx].addr
+                        if block_addr <= default_or_end_addr:
+                            continue
+                        if block_addr >= loop_update_addr:
+                            break
+                        if b.terminator == 'jmp':
+                            jmp_instr = instructions[b.end_idx - 1]
+                            target = jmp_instr.addr + jmp_instr.operands[0]
+                            if target == default_or_end_addr and jmp_instr.operands[0] < 0:
+                                has_backward_jmp_to_doa = True
+                                break
+                    if not has_backward_jmp_to_doa:
+                        exit_end_addr = default_or_end_addr
 
         if exit_end_addr == default_or_end_addr:
             forward_count = break_targets.get(exit_end_addr, 0)
@@ -2787,23 +2824,80 @@ def _embed_assign_in_expr_tree(expr: Expr, target_value: Expr,
         return _embed_assign_in_expr_tree(expr.target, target_value, assign_expr)
     return False
 
+def _embed_assign_by_var_name(expr: Expr, var_name: str,
+                               assign_expr: 'AssignExpr') -> bool:
+    if isinstance(expr, BinaryExpr):
+        if isinstance(expr.left, VarExpr) and expr.left.name == var_name:
+            expr.left = assign_expr
+            return True
+        if _embed_assign_by_var_name(expr.left, var_name, assign_expr):
+            return True
+        if isinstance(expr.right, VarExpr) and expr.right.name == var_name:
+            expr.right = assign_expr
+            return True
+        return _embed_assign_by_var_name(expr.right, var_name, assign_expr)
+    elif isinstance(expr, UnaryExpr):
+        return False
+    elif isinstance(expr, PropertyExpr):
+        if isinstance(expr.obj, VarExpr) and expr.obj.name == var_name:
+            expr.obj = assign_expr
+            return True
+        return _embed_assign_by_var_name(expr.obj, var_name, assign_expr)
+    elif isinstance(expr, MethodCallExpr):
+        if isinstance(expr.obj, VarExpr) and expr.obj.name == var_name:
+            expr.obj = assign_expr
+            return True
+        if _embed_assign_by_var_name(expr.obj, var_name, assign_expr):
+            return True
+        for i, arg in enumerate(expr.args):
+            if isinstance(arg, VarExpr) and arg.name == var_name:
+                expr.args[i] = assign_expr
+                return True
+            if _embed_assign_by_var_name(arg, var_name, assign_expr):
+                return True
+    elif isinstance(expr, CallExpr):
+        for i, arg in enumerate(expr.args):
+            if isinstance(arg, VarExpr) and arg.name == var_name:
+                expr.args[i] = assign_expr
+                return True
+            if _embed_assign_by_var_name(arg, var_name, assign_expr):
+                return True
+    elif isinstance(expr, TypeofExpr):
+        if isinstance(expr.target, VarExpr) and expr.target.name == var_name:
+            expr.target = assign_expr
+            return True
+        return _embed_assign_by_var_name(expr.target, var_name, assign_expr)
+    return False
+
 def _detect_assignment_in_condition(preamble_stmts: List[Stmt], cond: Expr,
                                      preamble_start_count: int = 0) -> Expr:
     if len(preamble_stmts) > preamble_start_count:
         last_stmt = preamble_stmts[-1]
         assign_expr = None
+        was_var_decl = False
         if (isinstance(last_stmt, ExprStmt) and
                 isinstance(last_stmt.expr, AssignExpr) and
                 isinstance(last_stmt.expr.target, VarExpr)):
             assign_expr = last_stmt.expr
         elif isinstance(last_stmt, VarDeclStmt) and last_stmt.value is not None:
             assign_expr = AssignExpr(VarExpr(last_stmt.name), last_stmt.value)
+            was_var_decl = True
         if assign_expr is not None:
+            embedded = False
             if isinstance(cond, BinaryExpr) and cond.left is assign_expr.value:
                 cond = BinaryExpr(assign_expr, cond.op, cond.right)
-                preamble_stmts.pop()
+                embedded = True
             elif _embed_assign_in_expr_tree(cond, assign_expr.value, assign_expr):
+                embedded = True
+            elif (getattr(last_stmt, '_cp_aliased', False) and
+                  isinstance(assign_expr.target, VarExpr) and
+                  _embed_assign_by_var_name(
+                      cond, assign_expr.target.name, assign_expr)):
+                embedded = True
+            if embedded:
                 preamble_stmts.pop()
+                if was_var_decl:
+                    preamble_stmts.append(VarDeclStmt(last_stmt.name))
     return cond
 
 def _generate_if(region: Region, cfg: CFG, instructions: List[Instruction],
@@ -3632,37 +3726,17 @@ def _finalize_pending_literal(decompiler: 'Decompiler', reg: int) -> Optional[Ex
 def _try_register_ternary(region: Region, cfg: CFG, instructions: List[Instruction],
                            decompiler: 'Decompiler', obj: CodeObject,
                            condition: Expr, target_reg: int) -> Optional[List[Stmt]]:
-    saved_regs = dict(decompiler.regs)
-    saved_flag = decompiler.flag
-    saved_flag_negated = decompiler.flag_negated
-    saved_pending_dicts = dict(decompiler.pending_dicts)
-    saved_pending_arrays = dict(decompiler.pending_arrays)
-    saved_pending_counters = set(decompiler.pending_counters)
+    snapshot = decompiler._save_speculative_state()
 
-    decompiler.regs = dict(saved_regs)
-    decompiler.flag = saved_flag
-    decompiler.flag_negated = saved_flag_negated
-    decompiler.pending_dicts = dict(saved_pending_dicts)
-    decompiler.pending_arrays = dict(saved_pending_arrays)
-    decompiler.pending_counters = set(saved_pending_counters)
+    decompiler._restore_speculative_state(snapshot)
     then_stmts = generate_code(region.then_region, cfg, instructions, decompiler, obj)
     true_expr = _finalize_pending_literal(decompiler, target_reg)
 
-    decompiler.regs = dict(saved_regs)
-    decompiler.flag = saved_flag
-    decompiler.flag_negated = saved_flag_negated
-    decompiler.pending_dicts = dict(saved_pending_dicts)
-    decompiler.pending_arrays = dict(saved_pending_arrays)
-    decompiler.pending_counters = set(saved_pending_counters)
+    decompiler._restore_speculative_state(snapshot)
     else_stmts = generate_code(region.else_region, cfg, instructions, decompiler, obj)
     false_expr = _finalize_pending_literal(decompiler, target_reg)
 
-    decompiler.regs = dict(saved_regs)
-    decompiler.flag = saved_flag
-    decompiler.flag_negated = saved_flag_negated
-    decompiler.pending_dicts = saved_pending_dicts
-    decompiler.pending_arrays = saved_pending_arrays
-    decompiler.pending_counters = saved_pending_counters
+    decompiler._restore_speculative_state(snapshot)
 
     def _has_non_expr_stmts(stmts):
         return any(not isinstance(s, ExprStmt) for s in stmts)
@@ -3725,37 +3799,17 @@ def _is_flag_only_branch(cfg: CFG, instructions: List[Instruction],
 def _try_flag_ternary(region: Region, cfg: CFG, instructions: List[Instruction],
                        decompiler: 'Decompiler', obj: CodeObject,
                        condition: Expr) -> Optional[List[Stmt]]:
-    saved_regs = dict(decompiler.regs)
-    saved_flag = decompiler.flag
-    saved_flag_negated = decompiler.flag_negated
-    saved_pending_dicts = dict(decompiler.pending_dicts)
-    saved_pending_arrays = dict(decompiler.pending_arrays)
-    saved_pending_counters = set(decompiler.pending_counters)
+    snapshot = decompiler._save_speculative_state()
 
-    decompiler.regs = dict(saved_regs)
-    decompiler.flag = saved_flag
-    decompiler.flag_negated = saved_flag_negated
-    decompiler.pending_dicts = dict(saved_pending_dicts)
-    decompiler.pending_arrays = dict(saved_pending_arrays)
-    decompiler.pending_counters = set(saved_pending_counters)
+    decompiler._restore_speculative_state(snapshot)
     then_stmts = generate_code(region.then_region, cfg, instructions, decompiler, obj)
     true_cond = decompiler._get_condition(False)
 
-    decompiler.regs = dict(saved_regs)
-    decompiler.flag = saved_flag
-    decompiler.flag_negated = saved_flag_negated
-    decompiler.pending_dicts = dict(saved_pending_dicts)
-    decompiler.pending_arrays = dict(saved_pending_arrays)
-    decompiler.pending_counters = set(saved_pending_counters)
+    decompiler._restore_speculative_state(snapshot)
     else_stmts = generate_code(region.else_region, cfg, instructions, decompiler, obj)
     false_cond = decompiler._get_condition(False)
 
-    decompiler.regs = dict(saved_regs)
-    decompiler.flag = saved_flag
-    decompiler.flag_negated = saved_flag_negated
-    decompiler.pending_dicts = saved_pending_dicts
-    decompiler.pending_arrays = saved_pending_arrays
-    decompiler.pending_counters = saved_pending_counters
+    decompiler._restore_speculative_state(snapshot)
 
     if then_stmts or else_stmts:
         return None
@@ -4384,8 +4438,7 @@ def _generate_do_while(region: Region, cfg: CFG, instructions: List[Instruction]
                 cond_start_idx = j
                 for k in range(j - 1, header.start_idx - 1, -1):
                     prev = instructions[k]
-                    if prev.op in (VM.CONST, VM.GPD, VM.GPI, VM.GPDS, VM.GPIS,
-                                   VM.CP, VM.ADD, VM.SUB, VM.MUL, VM.DIV):
+                    if prev.op in _DOWHILE_COND_PREAMBLE_OPS:
                         cond_start_idx = k
                     else:
                         break
@@ -4431,11 +4484,7 @@ def _generate_do_while(region: Region, cfg: CFG, instructions: List[Instruction]
                     cond_start_idx = j
                     for k in range(j - 1, header.start_idx - 1, -1):
                         prev = instructions[k]
-                        if prev.op in (VM.CONST, VM.GPD, VM.GPI, VM.GPDS, VM.GPIS,
-                                       VM.CP, VM.ADD, VM.SUB, VM.MUL, VM.DIV,
-                                       VM.MOD, VM.BAND, VM.BOR, VM.BXOR,
-                                       VM.SAR, VM.SAL, VM.CALLD, VM.CALL,
-                                       VM.CALLI, VM.NEW):
+                        if prev.op in _DOWHILE_COND_PREAMBLE_OPS:
                             cond_start_idx = k
                         else:
                             break
@@ -4508,10 +4557,7 @@ def _generate_do_while(region: Region, cfg: CFG, instructions: List[Instruction]
                     tail_cond_start = j
                     for k in range(j - 1, tail.start_idx - 1, -1):
                         prev = instructions[k]
-                        if prev.op in (VM.CONST, VM.GPD, VM.GPI, VM.GPDS, VM.GPIS,
-                                       VM.CP, VM.ADD, VM.SUB, VM.MUL, VM.DIV,
-                                       VM.MOD, VM.BAND, VM.BOR, VM.BXOR,
-                                       VM.SAR, VM.SAL):
+                        if prev.op in _DOWHILE_COND_PREAMBLE_OPS:
                             tail_cond_start = k
                         else:
                             break

@@ -292,6 +292,8 @@ class PropertyExpr(Expr):
         obj_src = self.obj.to_source()
         if isinstance(self.obj, (BinaryExpr, TernaryExpr, InContextOfExpr, AssignExpr, TypeofExpr, UnaryExpr, InstanceofExpr)):
             obj_src = f'({obj_src})'
+        elif isinstance(self.obj, CallExpr) and self.obj.is_new:
+            obj_src = f'({obj_src})'
 
         if isinstance(self.prop, str):
             if self.prop.isidentifier() and not self.prop.startswith('%'):
@@ -343,6 +345,8 @@ class MethodCallExpr(Expr):
 
         obj_src = self.obj.to_source()
         if isinstance(self.obj, (BinaryExpr, TernaryExpr, InContextOfExpr, AssignExpr, TypeofExpr, UnaryExpr, InstanceofExpr)):
+            obj_src = f'({obj_src})'
+        elif isinstance(self.obj, CallExpr) and self.obj.is_new:
             obj_src = f'({obj_src})'
 
         args_src = ', '.join(self._fmt_arg(a) for a in self.args)
@@ -467,6 +471,23 @@ class SwapExpr(Expr):
 
     def to_source(self) -> str:
         return f'{self.left.to_source()} <-> {self.right.to_source()}'
+
+def _expr_has_side_effect(expr):
+    if isinstance(expr, (CallExpr, MethodCallExpr, AssignExpr, DeleteExpr, SwapExpr)):
+        return True
+    if isinstance(expr, BinaryExpr):
+        return _expr_has_side_effect(expr.left) or _expr_has_side_effect(expr.right)
+    if isinstance(expr, UnaryExpr):
+        return _expr_has_side_effect(expr.operand)
+    if isinstance(expr, TernaryExpr):
+        return (_expr_has_side_effect(expr.cond) or
+                _expr_has_side_effect(expr.true_val) or
+                _expr_has_side_effect(expr.false_val))
+    if isinstance(expr, CommaExpr):
+        return any(_expr_has_side_effect(e) for e in expr.exprs)
+    if isinstance(expr, InContextOfExpr):
+        return _expr_has_side_effect(expr.func) or _expr_has_side_effect(expr.context)
+    return False
 
 class Stmt(ABC):
     @abstractmethod
@@ -603,6 +624,7 @@ class TryStmt(Stmt):
 @dataclass
 class _WithMarkerStmt(Stmt):
     expr: Expr
+    level: int = 0
 
     def to_source(self, indent: int = 0) -> str:
         return ''
@@ -611,6 +633,7 @@ class _WithMarkerStmt(Stmt):
 class WithStmt(Stmt):
     expr: Expr
     body: List[Stmt]
+    level: int = 0
 
     def to_source(self, indent: int = 0) -> str:
         prefix = '    ' * indent
@@ -652,6 +675,7 @@ class SwitchStmt(Stmt):
 @dataclass
 class FuncDeclStmt(Stmt):
     source_text: str
+    name: str = ''
 
     def to_source(self, indent=0) -> str:
         prefix = '    ' * indent
@@ -1064,6 +1088,7 @@ class Decompiler:
             try:
                 top_stmts = self._decompile_object(top_obj)
                 top_stmts = self._wrap_with_blocks(top_stmts)
+                top_stmts = self._hoist_cross_scope_vars(top_stmts)
                 for stmt in top_stmts:
                     top_lines.append(stmt.to_source(0))
             except Exception as e:
@@ -1118,19 +1143,28 @@ class Decompiler:
         else:
             return self._decompile_function(obj)
 
+    def _should_emit_spds_ampersand(self, r1: int) -> bool:
+        if r1 != -1:
+            return True
+        ctx = self.current_obj.context_type
+        return ctx not in (ContextType.TOP_LEVEL, ContextType.CLASS)
+
     @staticmethod
-    def _contains_with_this(node) -> bool:
+    def _contains_with_this(node, exclude_level: int = 0) -> bool:
         if isinstance(node, WithThisExpr):
             return True
+        if isinstance(node, WithStmt) and exclude_level > 0:
+            if node.level <= exclude_level:
+                return False
         if isinstance(node, (Expr, Stmt)):
             if hasattr(node, '__dataclass_fields__'):
                 for field_name in node.__dataclass_fields__:
                     val = getattr(node, field_name)
-                    if Decompiler._contains_with_this(val):
+                    if Decompiler._contains_with_this(val, exclude_level):
                         return True
         elif isinstance(node, (list, tuple)):
             for item in node:
-                if Decompiler._contains_with_this(item):
+                if Decompiler._contains_with_this(item, exclude_level):
                     return True
         return False
 
@@ -1146,10 +1180,11 @@ class Decompiler:
         result = list(stmts)
         for idx, marker in reversed(marker_indices):
             candidates = result[idx + 1:]
+            level = marker.level
 
             last_with_idx = -1
             for j, stmt in enumerate(candidates):
-                if self._contains_with_this(stmt):
+                if self._contains_with_this(stmt, exclude_level=level):
                     last_with_idx = j
 
             if last_with_idx >= 0:
@@ -1159,7 +1194,7 @@ class Decompiler:
                 body = candidates
                 continuation = []
 
-            with_stmt = WithStmt(marker.expr, body)
+            with_stmt = WithStmt(marker.expr, body, level=level)
             result = result[:idx] + [with_stmt] + continuation
 
         return result
@@ -1198,21 +1233,34 @@ class Decompiler:
             for s in body:
                 if isinstance(s, VarDeclStmt):
                     names.add(s.name)
+                if isinstance(s, FuncDeclStmt) and s.name:
+                    names.add(s.name)
                 if isinstance(s, ForStmt) and isinstance(s.init, VarDeclStmt):
                     names.add(s.init.name)
                 for child_body in _get_child_bodies(s):
                     names.update(_all_var_decls(child_body))
             return names
 
-        def _all_var_refs(stmts_list):
+        def _all_var_refs(stmts_list, extra_names=None):
             src = '\n'.join(s.to_source(0) for s in stmts_list)
-            return set(LOCAL_RE.findall(src))
+            refs = set(LOCAL_RE.findall(src))
+            if extra_names:
+                for name in extra_names:
+                    if re.search(r'\b' + re.escape(name) + r'\b', src):
+                        refs.add(name)
+            return refs
 
         def _convert_decl_to_assign(stmt, names):
             if isinstance(stmt, VarDeclStmt) and stmt.name in names:
                 if stmt.value:
                     return ExprStmt(AssignExpr(VarExpr(stmt.name), stmt.value))
                 return None
+            if isinstance(stmt, FuncDeclStmt) and stmt.name and stmt.name in names:
+                new_text = stmt.source_text.replace(
+                    'function ' + stmt.name, stmt.name + ' = function', 1)
+                if not new_text.rstrip().endswith(';'):
+                    new_text = new_text.rstrip() + ';'
+                return FuncDeclStmt(new_text, name='')
             for body in _get_child_bodies(stmt):
                 for i, s in enumerate(body):
                     r = _convert_decl_to_assign(s, names)
@@ -1241,15 +1289,17 @@ class Decompiler:
                 inner_decls.update(_all_var_decls(body))
             if not inner_decls:
                 continue
+            non_local_names = {n for n in inner_decls if not LOCAL_RE.fullmatch(n)}
             if i + 1 < len(stmts):
-                remaining_refs = _all_var_refs(stmts[i+1:])
+                remaining_refs = _all_var_refs(stmts[i+1:], extra_names=non_local_names)
                 hoisted.update(inner_decls & remaining_refs)
             if len(bodies) >= 2:
                 for bi, body in enumerate(bodies):
                     decls_here = _all_var_decls(body)
+                    non_local_here = {n for n in decls_here if not LOCAL_RE.fullmatch(n)}
                     for bj, other_body in enumerate(bodies):
                         if bi != bj and other_body:
-                            other_refs = _all_var_refs(other_body)
+                            other_refs = _all_var_refs(other_body, extra_names=non_local_here)
                             hoisted.update(decls_here & other_refs)
 
         if not hoisted:
@@ -1257,8 +1307,19 @@ class Decompiler:
 
         for stmt in stmts:
             _convert_decl_to_assign(stmt, hoisted)
-        new_stmts = [VarDeclStmt(name) for name in sorted(hoisted)]
-        new_stmts.extend(stmts)
+        hoisted_decls = [VarDeclStmt(name) for name in sorted(hoisted)]
+        insert_pos = 0
+        for s in stmts:
+            if (isinstance(s, IfStmt) and not s.else_body
+                    and len(s.then_body) == 1
+                    and isinstance(s.then_body[0], ExprStmt)
+                    and isinstance(s.then_body[0].expr, AssignExpr)
+                    and isinstance(s.then_body[0].expr.target, VarExpr)
+                    and s.then_body[0].expr.target.name.startswith('arg')):
+                insert_pos += 1
+            else:
+                break
+        new_stmts = stmts[:insert_pos] + hoisted_decls + stmts[insert_pos:]
         return new_stmts
 
     def _decompile_function(self, obj: CodeObject) -> str:
@@ -1385,6 +1446,7 @@ class Decompiler:
         saved_back_edges = set(self.back_edges) if hasattr(self, 'back_edges') else set()
         saved_loop_context_stack = list(self.loop_context_stack) if hasattr(self, 'loop_context_stack') else []
         saved_with_cp_addrs = set(self._with_cp_addrs)
+        saved_with_active_ranges = list(self._with_active_ranges)
         saved_in_with = self._in_with
         saved_parent_in_with = self._parent_in_with
         saved_pending_spie = self._pending_spie
@@ -1398,12 +1460,15 @@ class Decompiler:
         saved_side_effect_addrs = set(self._side_effect_multi_read_addrs)
         saved_callexpr_temp_cp = set(self._callexpr_temp_cp_addrs) if hasattr(self, '_callexpr_temp_cp_addrs') else set()
         saved_dead_gpd_addrs = set(self._dead_gpd_addrs)
+        saved_cp_alias_addrs = set(self._cp_side_effect_alias_addrs) if hasattr(self, '_cp_side_effect_alias_addrs') else set()
         saved_pending_func_decl = self._pending_func_decl_obj_idx
         saved_inline_emitted = set(self._inline_emitted_children)
 
         self._reset_state()
         self.current_obj = obj
-        if saved_in_with:
+        parent_in_with = any(start <= saved_current_addr < end
+                             for start, end in saved_with_active_ranges)
+        if parent_in_with or saved_in_with:
             self._parent_in_with = True
 
         args = self._build_args(obj)
@@ -1453,6 +1518,7 @@ class Decompiler:
             self.back_edges = saved_back_edges
             self.loop_context_stack = saved_loop_context_stack
             self._with_cp_addrs = saved_with_cp_addrs
+            self._with_active_ranges = saved_with_active_ranges
             self._in_with = saved_in_with
             self._parent_in_with = saved_parent_in_with
             self._pending_spie = saved_pending_spie
@@ -1466,6 +1532,7 @@ class Decompiler:
             self._side_effect_multi_read_addrs = saved_side_effect_addrs
             self._callexpr_temp_cp_addrs = saved_callexpr_temp_cp
             self._dead_gpd_addrs = saved_dead_gpd_addrs
+            self._cp_side_effect_alias_addrs = saved_cp_alias_addrs
             self._pending_func_decl_obj_idx = saved_pending_func_decl
             self._inline_emitted_children = saved_inline_emitted
 
@@ -1487,6 +1554,7 @@ class Decompiler:
         saved_back_edges = set(self.back_edges) if hasattr(self, 'back_edges') else set()
         saved_loop_context_stack = list(self.loop_context_stack) if hasattr(self, 'loop_context_stack') else []
         saved_with_cp_addrs = set(self._with_cp_addrs)
+        saved_with_active_ranges = list(self._with_active_ranges)
         saved_in_with = self._in_with
         saved_parent_in_with = self._parent_in_with
         saved_pending_spie = self._pending_spie
@@ -1500,6 +1568,7 @@ class Decompiler:
         saved_side_effect_addrs = set(self._side_effect_multi_read_addrs)
         saved_callexpr_temp_cp = set(self._callexpr_temp_cp_addrs) if hasattr(self, '_callexpr_temp_cp_addrs') else set()
         saved_dead_gpd_addrs = set(self._dead_gpd_addrs)
+        saved_cp_alias_addrs = set(self._cp_side_effect_alias_addrs) if hasattr(self, '_cp_side_effect_alias_addrs') else set()
         saved_pending_func_decl = self._pending_func_decl_obj_idx
         saved_inline_emitted = set(self._inline_emitted_children)
 
@@ -1522,6 +1591,7 @@ class Decompiler:
             self.back_edges = saved_back_edges
             self.loop_context_stack = saved_loop_context_stack
             self._with_cp_addrs = saved_with_cp_addrs
+            self._with_active_ranges = saved_with_active_ranges
             self._in_with = saved_in_with
             self._parent_in_with = saved_parent_in_with
             self._pending_spie = saved_pending_spie
@@ -1535,6 +1605,7 @@ class Decompiler:
             self._side_effect_multi_read_addrs = saved_side_effect_addrs
             self._callexpr_temp_cp_addrs = saved_callexpr_temp_cp
             self._dead_gpd_addrs = saved_dead_gpd_addrs
+            self._cp_side_effect_alias_addrs = saved_cp_alias_addrs
             self._pending_func_decl_obj_idx = saved_pending_func_decl
             self._inline_emitted_children = saved_inline_emitted
 
@@ -1543,7 +1614,18 @@ class Decompiler:
     def _decompile_class(self, obj: CodeObject, indent: int = 0) -> str:
         prefix = '    ' * indent
         inner = '    ' * (indent + 1)
-        lines = [f'{prefix}class {obj.name or "anonymous"} {{']
+
+        scg_parent_count = 0
+        if obj.super_class_getter >= 0:
+            scg_obj = self.loader.objects[obj.super_class_getter]
+            for c in scg_obj.code:
+                if (c & 0xffff) == VM.SRV:
+                    scg_parent_count += 1
+
+        if scg_parent_count > 1:
+            lines = [f'{prefix}class {obj.name or "anonymous"} {{ // @scg:{scg_parent_count}']
+        else:
+            lines = [f'{prefix}class {obj.name or "anonymous"} {{']
 
         self._reset_state()
         self.current_obj = obj
@@ -1679,6 +1761,7 @@ class Decompiler:
         self._context_var_names = set()
         self._prev_instruction = None
         self._with_cp_addrs = set()
+        self._with_active_ranges = []
         self._in_with = False
         self._parent_in_with = False
         self._pending_spie = None
@@ -1690,6 +1773,7 @@ class Decompiler:
         self._for_loop_update_addr = None
         self._for_loop_skip_tail_bid = None
         self._side_effect_multi_read_addrs = set()
+        self._cp_side_effect_alias_addrs = set()
         self._pending_func_decl_obj_idx = None
         self._callexpr_temp_cp_addrs = set()
         self._dead_gpd_addrs = set()
@@ -1697,6 +1781,38 @@ class Decompiler:
         self.jump_targets = {}
         self.back_edges = set()
         self.loop_context_stack = []
+
+    def _save_speculative_state(self) -> dict:
+        return {
+            'regs': dict(self.regs),
+            'flag': self.flag,
+            'flag_negated': self.flag_negated,
+            'declared_vars': set(self.declared_vars),
+            'local_vars': dict(self.local_vars),
+            'var_counter': self.var_counter,
+            'pending_dicts': dict(self.pending_dicts),
+            'pending_arrays': dict(self.pending_arrays),
+            'pending_counters': set(self.pending_counters),
+            '_pending_spie': self._pending_spie,
+            '_pre_stmts': list(self._pre_stmts),
+            '_current_addr': self._current_addr,
+            '_prev_instruction': self._prev_instruction,
+        }
+
+    def _restore_speculative_state(self, snapshot: dict):
+        self.regs = dict(snapshot['regs'])
+        self.flag = snapshot['flag']
+        self.flag_negated = snapshot['flag_negated']
+        self.declared_vars = set(snapshot['declared_vars'])
+        self.local_vars = dict(snapshot['local_vars'])
+        self.var_counter = snapshot['var_counter']
+        self.pending_dicts = dict(snapshot['pending_dicts'])
+        self.pending_arrays = dict(snapshot['pending_arrays'])
+        self.pending_counters = set(snapshot['pending_counters'])
+        self._pending_spie = snapshot['_pending_spie']
+        self._pre_stmts = list(snapshot['_pre_stmts'])
+        self._current_addr = snapshot['_current_addr']
+        self._prev_instruction = snapshot['_prev_instruction']
 
     def _detect_with_blocks(self, instructions: List[Instruction]):
         self._with_cp_addrs = set()
@@ -1783,6 +1899,21 @@ class Decompiler:
 
             if not is_read:
                 self._with_cp_addrs.add(cp_addr)
+
+        from collections import defaultdict
+        level_groups = defaultdict(list)
+        for cp_idx, dest_reg, src_reg, cp_addr in cp_candidates:
+            if cp_addr in self._with_cp_addrs:
+                level_groups[dest_reg].append(cp_addr)
+        self._with_active_ranges = []
+        for level, addrs in level_groups.items():
+            addrs.sort()
+            for i, addr in enumerate(addrs):
+                if i + 1 < len(addrs):
+                    end = addrs[i + 1]
+                else:
+                    end = float('inf')
+                self._with_active_ranges.append((addr, end))
 
         self._callexpr_temp_cp_addrs = set()
         for i, instr in enumerate(instructions):
@@ -2001,6 +2132,13 @@ class Decompiler:
                 if not _addr_in_loop_condition(instr.addr):
                     self._side_effect_multi_read_addrs.add(instr.addr)
 
+        _DEAD_GPD_OVERWRITE_OPS = frozenset((
+            VM.CP, VM.CONST, VM.CL, VM.CCL, VM.GLOBAL,
+            VM.GPD, VM.GPDS, VM.GPI, VM.GPIS,
+            VM.CALL, VM.CALLD, VM.CALLI, VM.NEW,
+            VM.SETF, VM.SETNF,
+        ))
+        _dead_gpd_addr_to_idx = {inst.addr: idx for idx, inst in enumerate(instructions)}
         self._dead_gpd_addrs = set()
         for i, instr in enumerate(instructions):
             if instr.op not in (VM.GPD, VM.GPI):
@@ -2010,12 +2148,6 @@ class Decompiler:
                 continue
             found_read = False
             found_overwrite = False
-            _OVERWRITE_OPS = frozenset((
-                VM.CP, VM.CONST, VM.CL, VM.CCL, VM.GLOBAL,
-                VM.GPD, VM.GPDS, VM.GPI, VM.GPIS,
-                VM.CALL, VM.CALLD, VM.CALLI, VM.NEW,
-                VM.SETF, VM.SETNF,
-            ))
             for j in range(i + 1, len(instructions)):
                 nxt = instructions[j]
                 if nxt.op in (VM.JMP, VM.JF, VM.JNF, VM.RET, VM.THROW):
@@ -2024,7 +2156,7 @@ class Decompiler:
                 if dest in read_regs:
                     found_read = True
                     break
-                if nxt.operands and nxt.operands[0] == dest and nxt.op in _OVERWRITE_OPS:
+                if nxt.operands and nxt.operands[0] == dest and nxt.op in _DEAD_GPD_OVERWRITE_OPS:
                     found_overwrite = True
                     break
             if found_read:
@@ -2032,15 +2164,76 @@ class Decompiler:
             if found_overwrite:
                 self._dead_gpd_addrs.add(instr.addr)
                 continue
-            globally_read = False
-            for j in range(i + 1, len(instructions)):
-                nxt = instructions[j]
+            reachable_read = False
+            worklist = [i + 1]
+            visited = set()
+            while worklist:
+                idx = worklist.pop()
+                if idx in visited or idx < 0 or idx >= len(instructions):
+                    continue
+                visited.add(idx)
+                nxt = instructions[idx]
                 read_regs = _get_read_regs(nxt)
                 if dest in read_regs:
-                    globally_read = True
+                    reachable_read = True
                     break
-            if not globally_read:
+                if nxt.operands and nxt.operands[0] == dest and nxt.op in _DEAD_GPD_OVERWRITE_OPS:
+                    continue
+                if nxt.op == VM.JMP:
+                    target_addr = nxt.addr + nxt.operands[0]
+                    target_idx = _dead_gpd_addr_to_idx.get(target_addr)
+                    if target_idx is not None:
+                        worklist.append(target_idx)
+                elif nxt.op in (VM.JF, VM.JNF):
+                    target_addr = nxt.addr + nxt.operands[0]
+                    target_idx = _dead_gpd_addr_to_idx.get(target_addr)
+                    if target_idx is not None:
+                        worklist.append(target_idx)
+                    worklist.append(idx + 1)
+                elif nxt.op in (VM.RET, VM.THROW):
+                    continue
+                elif nxt.op == VM.ENTRY:
+                    handler_addr = nxt.addr + nxt.operands[0]
+                    handler_idx = _dead_gpd_addr_to_idx.get(handler_addr)
+                    if handler_idx is not None:
+                        worklist.append(handler_idx)
+                    worklist.append(idx + 1)
+                else:
+                    worklist.append(idx + 1)
+            if not reachable_read:
                 self._dead_gpd_addrs.add(instr.addr)
+
+        _comparison_ops = frozenset((VM.CEQ, VM.CDEQ, VM.CLT, VM.CGT))
+        _cp_overwrite_ops = frozenset((
+            VM.CP, VM.CONST, VM.CL, VM.CCL, VM.GLOBAL,
+            VM.GPD, VM.GPDS, VM.GPI, VM.GPIS,
+            VM.CALL, VM.CALLD, VM.CALLI, VM.NEW,
+            VM.SETF, VM.SETNF,
+        ))
+        self._cp_side_effect_alias_addrs = set()
+        for i, instr in enumerate(instructions):
+            if instr.op != VM.CP:
+                continue
+            ops = instr.operands
+            if len(ops) < 2:
+                continue
+            r1, r2 = ops[0], ops[1]
+            if r1 >= -2 or r2 < 0:
+                continue
+            next_read_is_cmp = False
+            for j in range(i + 1, len(instructions)):
+                nxt = instructions[j]
+                if nxt.op in (VM.JMP, VM.JF, VM.JNF, VM.RET, VM.THROW):
+                    break
+                if (nxt.operands and nxt.operands[0] == r2 and
+                        nxt.op in _cp_overwrite_ops):
+                    break
+                read_regs = _get_read_regs(nxt)
+                if r2 in read_regs:
+                    next_read_is_cmp = nxt.op in _comparison_ops
+                    break
+            if not next_read_is_cmp:
+                self._cp_side_effect_alias_addrs.add(instr.addr)
 
     def _decompile_object(self, obj: CodeObject) -> List[Stmt]:
         if not obj.code:
@@ -2524,6 +2717,82 @@ class Decompiler:
 
                     swap_stmt = ExprStmt(SwapExpr(left, right))
                     return {'stmt': swap_stmt, 'next_idx': start_idx + 5}
+
+        if start_idx + 6 <= end_idx:
+            i0 = instructions[start_idx]
+            i1 = instructions[start_idx + 1]
+            if (i0.op in (VM.GPD, VM.GPDS) and i1.op == VM.GLOBAL):
+                rA, obj1, prop1 = i0.operands[0], i0.operands[1], i0.operands[2]
+                rG = i1.operands[0]
+
+                read_chain = []
+                ci = start_idx + 2
+                prev_reg = rG
+                while ci < end_idx:
+                    instr = instructions[ci]
+                    if instr.op not in (VM.GPD, VM.GPDS):
+                        break
+                    dest, src, prop = instr.operands[0], instr.operands[1], instr.operands[2]
+                    if src != prev_reg:
+                        break
+                    read_chain.append((dest, src, prop))
+                    prev_reg = dest
+                    ci += 1
+
+                if len(read_chain) >= 1:
+                    rB = read_chain[-1][0]
+                    prop2 = read_chain[-1][2]
+
+                    write_chain_len = len(read_chain) - 1
+                    needed = 2 + write_chain_len + 1
+                    if ci + needed <= end_idx:
+                        spde1 = instructions[ci]
+                        glob2 = instructions[ci + 1]
+
+                        if (spde1.op in (VM.SPD, VM.SPDE, VM.SPDEH, VM.SPDS) and
+                            glob2.op == VM.GLOBAL and
+                            spde1.operands[0] == obj1 and
+                            spde1.operands[1] == prop1 and
+                            spde1.operands[2] == rB):
+
+                            rG2 = glob2.operands[0]
+
+                            wi = ci + 2
+                            write_ok = True
+                            prev_wreg = rG2
+                            for k in range(write_chain_len):
+                                winstr = instructions[wi + k]
+                                if winstr.op not in (VM.GPD, VM.GPDS):
+                                    write_ok = False
+                                    break
+                                wdest, wsrc, wprop = winstr.operands[0], winstr.operands[1], winstr.operands[2]
+                                if wsrc != prev_wreg or wprop != read_chain[k][2]:
+                                    write_ok = False
+                                    break
+                                prev_wreg = wdest
+
+                            if write_ok:
+                                spde2_idx = ci + 2 + write_chain_len
+                                spde2 = instructions[spde2_idx]
+                                if (spde2.op in (VM.SPD, VM.SPDE, VM.SPDEH, VM.SPDS) and
+                                    spde2.operands[0] == prev_wreg and
+                                    spde2.operands[1] == prop2 and
+                                    spde2.operands[2] == rA):
+
+                                    left_prop_name = obj.data[prop1] if prop1 < len(obj.data) else f'prop{prop1}'
+                                    left_obj_expr = _get_obj_expr(obj1, i0)
+                                    left = PropertyExpr(left_obj_expr, left_prop_name if isinstance(left_prop_name, str) else str(left_prop_name))
+
+                                    if self._parent_in_with:
+                                        right_expr = WithDotProxy()
+                                    else:
+                                        right_expr = GlobalExpr()
+                                    for dest, src, pidx in read_chain:
+                                        pname = obj.data[pidx] if pidx < len(obj.data) else f'prop{pidx}'
+                                        right_expr = PropertyExpr(right_expr, pname if isinstance(pname, str) else str(pname))
+
+                                    swap_stmt = ExprStmt(SwapExpr(left, right_expr))
+                                    return {'stmt': swap_stmt, 'next_idx': spde2_idx + 1}
 
         if start_idx + 2 < end_idx:
             i0, i1, i2 = instructions[start_idx:start_idx + 3]
@@ -4109,11 +4378,16 @@ class Decompiler:
                 return BinaryExpr(self._negate_expr(expr.left), '&&', self._negate_expr(expr.right))
         return UnaryExpr('!', expr)
 
+    def _make_pending_spie_stmt(self, pending: dict) -> Stmt:
+        if pending.get('is_class_member_var') and pending.get('member_name'):
+            return VarDeclStmt(pending['member_name'], pending['value'])
+        return ExprStmt(AssignExpr(pending['target'], pending['value']))
+
     def _flush_pending_spie(self):
         if self._pending_spie is not None:
             pending = self._pending_spie
             self._pending_spie = None
-            return ExprStmt(AssignExpr(pending['target'], pending['value']))
+            return self._make_pending_spie_stmt(pending)
         return None
 
     def _collect_pre_stmts(self, stmts: list):
@@ -4178,7 +4452,7 @@ class Decompiler:
                     self.regs[vreg] = AssignExpr(pending['target'], pending['value'])
                 else:
                     self._pending_spie = None
-                    self._pre_stmts.append(ExprStmt(AssignExpr(pending['target'], pending['value'])))
+                    self._pre_stmts.append(self._make_pending_spie_stmt(pending))
             elif op_check == VM.CHGTHIS:
                 vreg = pending['value_reg']
                 if len(ops_check) >= 2 and ops_check[1] == vreg:
@@ -4186,7 +4460,7 @@ class Decompiler:
                     self.regs[vreg] = AssignExpr(pending['target'], pending['value'])
                 else:
                     self._pending_spie = None
-                    self._pre_stmts.append(ExprStmt(AssignExpr(pending['target'], pending['value'])))
+                    self._pre_stmts.append(self._make_pending_spie_stmt(pending))
             else:
                 vreg = pending['value_reg']
                 _REG_WRITING_OPS = frozenset({
@@ -4218,7 +4492,7 @@ class Decompiler:
                 is_side_effect = op_check in _SIDE_EFFECT_OPS
                 if writes_to_vreg or writes_to_local or is_side_effect:
                     self._pending_spie = None
-                    self._pre_stmts.append(ExprStmt(AssignExpr(pending['target'], pending['value'])))
+                    self._pre_stmts.append(self._make_pending_spie_stmt(pending))
 
         prev_instr = self._prev_instruction
         self._prev_instruction = instr
@@ -4236,7 +4510,9 @@ class Decompiler:
             if r == -1:
                 return ThisExpr()
             if r == -2:
-                if self._in_with:
+                in_with = any(start <= self._current_addr < end
+                              for start, end in self._with_active_ranges)
+                if in_with:
                     return WithThisExpr()
                 return ThisProxyExpr()
             if r < -2:
@@ -4355,9 +4631,8 @@ class Decompiler:
             src = get_reg(r2)
 
             if instr.addr in self._with_cp_addrs:
-                self._in_with = True
                 set_reg(r1, src)
-                return _WithMarkerStmt(src)
+                return _WithMarkerStmt(src, level=r1)
 
             if hasattr(self, '_callexpr_temp_cp_addrs') and instr.addr in self._callexpr_temp_cp_addrs:
                 name = f'_temp{r1}'
@@ -4378,22 +4653,30 @@ class Decompiler:
                     set_reg(r2, VarExpr(func_name))
                     self._inline_emitted_children.add(obj_idx)
                     defn_text = self._decompile_inline_func_decl(child_obj)
-                    return FuncDeclStmt(defn_text)
+                    return FuncDeclStmt(defn_text, name=func_name)
 
             if r1 < -2:
                 name = self._get_local_name(r1)
                 set_reg(r1, VarExpr(name))
 
+                _cp_aliased = False
                 if r2 >= 0 and (
                     isinstance(src, (DictExpr, ArrayExpr)) or
-                    (isinstance(src, CallExpr) and src.is_new)
+                    (instr.addr in self._cp_side_effect_alias_addrs and
+                     _expr_has_side_effect(src))
                 ):
                     set_reg(r2, VarExpr(name))
+                    if not isinstance(src, (DictExpr, ArrayExpr)):
+                        _cp_aliased = True
 
                 if name not in self.declared_vars:
                     self.declared_vars.add(name)
-                    return VarDeclStmt(name, src)
-                return ExprStmt(AssignExpr(VarExpr(name), src))
+                    stmt = VarDeclStmt(name, src)
+                else:
+                    stmt = ExprStmt(AssignExpr(VarExpr(name), src))
+                if _cp_aliased:
+                    stmt._cp_aliased = True
+                return stmt
 
             set_reg(r1, src)
             return None
@@ -4626,24 +4909,31 @@ class Decompiler:
             else:
                 target = PropertyExpr(obj_expr, make_const(prop))
 
+            is_class_member_var = (
+                op == VM.SPDS and r1 == -1
+                and self.current_obj.context_type == ContextType.CLASS
+            )
+
             if r3 > 0 and (
                 isinstance(value, (DictExpr, ArrayExpr)) or
                 (isinstance(value, CallExpr) and value.is_new)
             ):
                 deferred_target = target
-                if op == VM.SPDS and r1 != -1:
+                if op == VM.SPDS and self._should_emit_spds_ampersand(r1):
                     deferred_target = UnaryExpr('&', target)
                 self._pending_spie = {
                     'target': deferred_target,
                     'value': value,
                     'value_reg': r3,
+                    'is_class_member_var': is_class_member_var,
+                    'member_name': prop if is_class_member_var and isinstance(prop, str) else None,
                 }
                 return None
 
             if r3 > 0:
                 set_reg(r3, target)
 
-            if op == VM.SPDS and r1 != -1:
+            if op == VM.SPDS and self._should_emit_spds_ampersand(r1):
                 target = UnaryExpr('&', target)
 
             if op == VM.SPDS and r1 == -1:
@@ -4654,6 +4944,10 @@ class Decompiler:
                     ref_obj = self.loader.objects[ref_expr.obj_index]
                     if ContextType(ref_obj.context_type) == ContextType.PROPERTY:
                         return None
+
+            if is_class_member_var and isinstance(prop, str):
+                val_expr = None if isinstance(value, VoidExpr) else value
+                return VarDeclStmt(prop, val_expr)
 
             return ExprStmt(AssignExpr(target, value))
 

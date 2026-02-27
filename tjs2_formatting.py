@@ -883,7 +883,7 @@ def _restore_extends(source: str) -> tuple:
     while i < len(lines):
         line = lines[i]
 
-        m = re.match(r'^(\s*)class\s+(\w+)\s*\{', line)
+        m = re.match(r'^(\s*)class\s+(\w+)\s*\{(?:\s*//\s*@scg:(\d+))?\s*$', line)
         if not m:
             result.append(line)
             i += 1
@@ -891,24 +891,36 @@ def _restore_extends(source: str) -> tuple:
 
         indent_str = m.group(1)
         class_name = m.group(2)
+        scg_count = int(m.group(3)) if m.group(3) else 1
 
+        parents = []
         j = i + 1
         while j < len(lines) and not lines[j].strip():
             j += 1
+        first_incontextof_j = j
 
-        if j < len(lines):
+        while j < len(lines) and len(parents) < scg_count:
             next_line = lines[j].strip()
             em = re.match(r'^\((?:global\.)?(\w+)\s+incontextof\s+this\)\(\)\s*;?\s*$', next_line)
             if em:
-                parent_name = em.group(1)
-                inheritance_map[class_name] = parent_name
-                result.append(f'{indent_str}class {class_name} extends {parent_name} {{')
-                for k in range(i + 1, j):
-                    result.append(lines[k])
-                i = j + 1
-                continue
+                parents.append(em.group(1))
+                j += 1
+            else:
+                break
 
-        result.append(line)
+        if parents:
+            inheritance_map[class_name] = parents
+            extends_str = ', '.join(parents)
+            result.append(f'{indent_str}class {class_name} extends {extends_str} {{')
+            for k in range(i + 1, first_incontextof_j):
+                result.append(lines[k])
+            i = j
+            continue
+
+        if m.group(3):
+            result.append(f'{indent_str}class {class_name} {{')
+        else:
+            result.append(line)
         i += 1
 
     return '\n'.join(result), inheritance_map
@@ -955,19 +967,19 @@ def _restore_super_calls(source: str, inheritance_map: dict) -> str:
     lines = source.split('\n')
     result = []
     current_class = None
-    current_parent = None
+    current_parents = []
     brace_depth = 0
     class_stack = []
 
     for line in lines:
         stripped = line.strip()
 
-        cm = re.match(r'^(\s*)class\s+(\w+)(?:\s+extends\s+(\w+))?\s*\{', line)
+        cm = re.match(r'^(\s*)class\s+(\w+)(?:\s+extends\s+[\w,\s]+)?\s*\{', line)
         if cm:
             if current_class is not None:
-                class_stack.append((current_class, current_parent, brace_depth))
+                class_stack.append((current_class, current_parents, brace_depth))
             current_class = cm.group(2)
-            current_parent = inheritance_map.get(current_class)
+            current_parents = inheritance_map.get(current_class, [])
             brace_depth = 1
             result.append(line)
             continue
@@ -991,15 +1003,17 @@ def _restore_super_calls(source: str, inheritance_map: dict) -> str:
                     brace_depth -= 1
                     if brace_depth == 0:
                         if class_stack:
-                            current_class, current_parent, brace_depth = class_stack.pop()
+                            current_class, current_parents, brace_depth = class_stack.pop()
                         else:
                             current_class = None
-                            current_parent = None
+                            current_parents = []
                         break
                 j += 1
 
-        if current_parent and ('global.' + current_parent + '.') in line:
-            line = _restore_super_in_line(line, current_parent)
+        if len(current_parents) == 1:
+            first_parent = current_parents[0]
+            if ('global.' + first_parent + '.') in line:
+                line = _restore_super_in_line(line, first_parent)
 
         result.append(line)
 
@@ -1063,7 +1077,20 @@ def _merge_else_if_pass(source: str) -> str:
             i += 1
             continue
 
-        next_stripped = lines[i + 1].rstrip()
+        var_lines = []
+        scan = i + 1
+        while scan < len(lines):
+            ln = lines[scan].rstrip()
+            if (ln.startswith(inner_indent)
+                    and re.match(r'^var\s+\w+\s*;\s*$', ln[len(inner_indent):])):
+                var_lines.append(lines[scan])
+                scan += 1
+            else:
+                break
+
+        if_line_idx = scan
+
+        next_stripped = lines[if_line_idx].rstrip() if if_line_idx < len(lines) else ''
         if not (next_stripped.startswith(inner_indent + 'if (')
                 and (len(next_stripped) == len(inner_indent)
                      or next_stripped[len(inner_indent)] != ' ')):
@@ -1091,9 +1118,12 @@ def _merge_else_if_pass(source: str) -> str:
 
         inner_depth = 1
         if_end_line = -1
-        for j in range(i + 1, close_idx):
+        saw_open = False
+        for j in range(if_line_idx, close_idx):
             inner_depth += _count_braces_in_line(lines[j])
-            if inner_depth == 1:
+            if inner_depth > 1:
+                saw_open = True
+            if saw_open and inner_depth == 1:
                 if_end_line = j
                 break
 
@@ -1102,10 +1132,12 @@ def _merge_else_if_pass(source: str) -> str:
             i += 1
             continue
 
-        if_content = lines[i + 1].rstrip()[len(inner_indent):]
+        for vl in var_lines:
+            result.append(vl)
+        if_content = lines[if_line_idx].rstrip()[len(inner_indent):]
         result.append(base_indent + '} else ' + if_content)
 
-        for k in range(i + 2, close_idx):
+        for k in range(if_line_idx + 1, close_idx):
             old = lines[k]
             if old.startswith(inner_indent):
                 result.append(base_indent + old[len(inner_indent):])
