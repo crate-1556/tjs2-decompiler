@@ -220,13 +220,10 @@ function askYesNo(message, caption = "確認")
 <summary>Decompiled Output / 反编译输出</summary>
 
 ```javascript
-this.YesNoDialogWindow = YesNoDialogWindow;
-this.askYesNo = askYesNo incontextof this;
-
 class YesNoDialogWindow extends Window {
-    this.yesButton = void;
-    this.noButton = void;
-    this.result = 0;
+    var yesButton;
+    var noButton;
+    var result = 0;
 
     function YesNoDialogWindow(arg0, arg1) {
         super.Window();
@@ -359,7 +356,8 @@ function askYesNo(arg0, arg1 = "確認") {
     invalidate(local0);
     return local1;
 }
-
+this.YesNoDialogWindow = YesNoDialogWindow;
+this.askYesNo = askYesNo incontextof this;
 ```
 
 </details>
