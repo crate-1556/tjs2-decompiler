@@ -1,8 +1,8 @@
 # TJS2 Decompiler / TJS2反编译器
 
-This project implements a TJS2 (TJS2100) bytecode decompiler for the Kirikiri visual novel engine, converting compiled bytecode into human-readable TJS2 source code.
+This project implements a TJS2 (TJS2100) bytecode decompiler for the Kirikiri visual novel engine, converting compiled bytecode into human-readable and executable TJS2 source code.
 
-用于 Kirikiri（吉里吉里）视觉小说引擎的 TJS2（TJS2100）字节码反编译器，将字节码还原为可读的 TJS2 源代码。
+用于 Kirikiri（吉里吉里）视觉小说引擎的 TJS2（TJS2100）字节码反编译器，将字节码还原为可读且可执行的 TJS2 源代码。
 
 ## Usage / 使用方法
 
@@ -348,6 +348,7 @@ class YesNoDialogWindow extends Window {
         }
     }
 }
+this.YesNoDialogWindow = YesNoDialogWindow;
 
 function askYesNo(arg0, arg1 = "確認") {
     var local0 = new YesNoDialogWindow(arg0, arg1);
@@ -356,7 +357,6 @@ function askYesNo(arg0, arg1 = "確認") {
     invalidate(local0);
     return local1;
 }
-this.YesNoDialogWindow = YesNoDialogWindow;
 this.askYesNo = askYesNo incontextof this;
 ```
 
@@ -373,4 +373,7 @@ This decompiler has been verified to cover all bytecode patterns the compiler ca
 - [x] [KAGEX3/system](https://github.com/krkrz/krkr2/tree/master/kirikiri2/branches/kag3ex3/template/system) 
 - [x] All script files of a complete game / 一部游戏的全部脚本资源
 
-**NOTE**: 基于TJS2语言特性与运行测试DEBUG中，待更新。
+The complete game has been runtime-verified to launch and run correctly using only decompiled scripts.
+游戏测试项目已通过运行时验证，仅使用反编译脚本即可正常启动并运行。
+
+**PROGRESS**: 将会优化输出格式，特别是变量名部分，之后测试其他游戏项目若发现BUG也会修正。

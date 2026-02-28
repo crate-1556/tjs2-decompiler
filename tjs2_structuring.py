@@ -7,7 +7,7 @@ from typing import List, Dict, Optional, Set, Tuple, Any
 from tjs2_decompiler import (
     VM, Instruction, CodeObject, Expr, Stmt, ConstExpr, VarExpr, VoidExpr,
     BinaryExpr, UnaryExpr, TernaryExpr, AssignExpr, PropertyExpr,
-    CallExpr, MethodCallExpr, CommaExpr, TypeofExpr, IsValidExpr,
+    CallExpr, MethodCallExpr, CommaExpr, TypeofExpr, IsValidExpr, TypeCastExpr,
     ArrayExpr, DictExpr,
     ExprStmt, VarDeclStmt, IfStmt, WhileStmt, DoWhileStmt, ForStmt, TryStmt,
     BreakStmt, ContinueStmt, ReturnStmt, SwapExpr, SwitchStmt,
@@ -2552,7 +2552,14 @@ def _generate_block(region: Region, cfg: CFG, instructions: List[Instruction],
         decompiler._collect_pre_stmts(stmts)
         if stmt:
             stmts.append(stmt)
+            if decompiler._deferred_cp_stmts:
+                stmts.extend(decompiler._deferred_cp_stmts)
+                decompiler._deferred_cp_stmts = []
         i += 1
+
+    if decompiler._deferred_cp_stmts:
+        stmts.extend(decompiler._deferred_cp_stmts)
+        decompiler._deferred_cp_stmts = []
 
     flushed = decompiler._flush_pending_spie()
     if flushed:
@@ -2601,6 +2608,7 @@ def _generate_sequence(region: Region, cfg: CFG, instructions: List[Instruction]
     return stmts
 
 def _absorb_for_init(stmts: List[Stmt]) -> None:
+    import re
     i = 1
     while i < len(stmts):
         if isinstance(stmts[i], ForStmt) and stmts[i].init is None:
@@ -2608,6 +2616,19 @@ def _absorb_for_init(stmts: List[Stmt]) -> None:
             if isinstance(prev, (ExprStmt, VarDeclStmt)):
                 if _is_matching_for_init(prev, stmts[i]):
                     if isinstance(prev, VarDeclStmt):
+                        var_name = prev.name
+                        used_after = False
+                        pattern = re.compile(r'\b' + re.escape(var_name) + r'\b')
+                        for j in range(i + 1, len(stmts)):
+                            if pattern.search(stmts[j].to_source()):
+                                used_after = True
+                                break
+                        if used_after:
+                            if prev.value is not None:
+                                stmts[i].init = AssignExpr(VarExpr(var_name), prev.value)
+                                prev.value = None
+                            i += 1
+                            continue
                         stmts[i].init = prev
                     else:
                         stmts[i].init = prev.expr
@@ -2822,6 +2843,11 @@ def _embed_assign_in_expr_tree(expr: Expr, target_value: Expr,
             expr.target = assign_expr
             return True
         return _embed_assign_in_expr_tree(expr.target, target_value, assign_expr)
+    elif isinstance(expr, TypeCastExpr):
+        if expr.operand is target_value:
+            expr.operand = assign_expr
+            return True
+        return _embed_assign_in_expr_tree(expr.operand, target_value, assign_expr)
     return False
 
 def _embed_assign_by_var_name(expr: Expr, var_name: str,
@@ -2867,6 +2893,11 @@ def _embed_assign_by_var_name(expr: Expr, var_name: str,
             expr.target = assign_expr
             return True
         return _embed_assign_by_var_name(expr.target, var_name, assign_expr)
+    elif isinstance(expr, TypeCastExpr):
+        if isinstance(expr.operand, VarExpr) and expr.operand.name == var_name:
+            expr.operand = assign_expr
+            return True
+        return _embed_assign_by_var_name(expr.operand, var_name, assign_expr)
     return False
 
 def _detect_assignment_in_condition(preamble_stmts: List[Stmt], cond: Expr,
@@ -2940,22 +2971,34 @@ def _generate_if(region: Region, cfg: CFG, instructions: List[Instruction],
     saved_flag_negated = decompiler.flag_negated
 
     then_stmts = []
+    then_regs = saved_regs
     if region.then_region:
         decompiler.regs = dict(saved_regs)
         decompiler.flag = saved_flag
         decompiler.flag_negated = saved_flag_negated
         then_stmts = generate_code(region.then_region, cfg, instructions, decompiler, obj, loop_context)
+        then_regs = dict(decompiler.regs)
 
     else_stmts = []
+    else_regs = saved_regs
     if region.else_region:
         decompiler.regs = dict(saved_regs)
         decompiler.flag = saved_flag
         decompiler.flag_negated = saved_flag_negated
         else_stmts = generate_code(region.else_region, cfg, instructions, decompiler, obj, loop_context)
+        else_regs = dict(decompiler.regs)
 
     decompiler.regs = dict(saved_regs)
     decompiler.flag = saved_flag
     decompiler.flag_negated = saved_flag_negated
+
+    if region.type == RegionType.IF_THEN_ELSE:
+        for reg in set(then_regs) | set(else_regs):
+            if reg > 0 and reg not in saved_regs:
+                then_val = then_regs.get(reg)
+                else_val = else_regs.get(reg)
+                if then_val is not None and else_val is not None:
+                    decompiler.regs[reg] = then_val
 
     if decompiler._switch_break_stack:
         switch_break = decompiler._switch_break_stack[-1]
@@ -3581,22 +3624,34 @@ def _generate_compound_condition_if(region, cfg: CFG, instructions: List[Instruc
     saved_flag_negated = decompiler.flag_negated
 
     then_stmts = []
+    then_regs = saved_regs
     if region.then_region:
         decompiler.regs = dict(saved_regs)
         decompiler.flag = saved_flag
         decompiler.flag_negated = saved_flag_negated
         then_stmts = generate_code(region.then_region, cfg, instructions, decompiler, obj, loop_context)
+        then_regs = dict(decompiler.regs)
 
     else_stmts = []
+    else_regs = saved_regs
     if region.else_region:
         decompiler.regs = dict(saved_regs)
         decompiler.flag = saved_flag
         decompiler.flag_negated = saved_flag_negated
         else_stmts = generate_code(region.else_region, cfg, instructions, decompiler, obj, loop_context)
+        else_regs = dict(decompiler.regs)
 
     decompiler.regs = dict(saved_regs)
     decompiler.flag = saved_flag
     decompiler.flag_negated = saved_flag_negated
+
+    if region.type == RegionType.IF_THEN_ELSE:
+        for reg in set(then_regs) | set(else_regs):
+            if reg > 0 and reg not in saved_regs:
+                then_val = then_regs.get(reg)
+                else_val = else_regs.get(reg)
+                if then_val is not None and else_val is not None:
+                    decompiler.regs[reg] = then_val
 
     if decompiler._switch_break_stack:
         switch_break = decompiler._switch_break_stack[-1]
@@ -4787,8 +4842,13 @@ def _generate_switch(region: Region, cfg: CFG, instructions: List[Instruction],
                         sc.has_break = True
             elif (body_stmts and isinstance(body_stmts[-1], ContinueStmt)
                   and switch_last_in_loop and not sc.body_is_continue):
-                body_stmts.pop()
-                sc.has_break = True
+                continue_target = loop_context[2] if loop_context else None
+                has_post_switch_code = (switch_break_addr is not None
+                                        and continue_target is not None
+                                        and switch_break_addr < continue_target)
+                if not (sc.has_continue and has_post_switch_code):
+                    body_stmts.pop()
+                    sc.has_break = True
 
             elif (body_stmts and switch_break_addr is not None
                   and not isinstance(body_stmts[-1], (BreakStmt, ContinueStmt, ReturnStmt))
@@ -4896,6 +4956,7 @@ def _generate_try_catch(region: Region, cfg: CFG, instructions: List[Instruction
     decompiler.flag = saved_flag
     decompiler.flag_negated = saved_flag_negated
 
+    catch_was_already_declared = catch_var_name in decompiler.declared_vars
     decompiler.declared_vars.add(catch_var_name)
 
     catch_stmts = []
@@ -4907,6 +4968,9 @@ def _generate_try_catch(region: Region, cfg: CFG, instructions: List[Instruction
     decompiler.regs = dict(saved_regs)
     decompiler.flag = saved_flag
     decompiler.flag_negated = saved_flag_negated
+
+    if not catch_was_already_declared:
+        decompiler.declared_vars.discard(catch_var_name)
 
     try_stmt = TryStmt(try_stmts, catch_var_name, catch_stmts)
     return preamble_stmts + [try_stmt]

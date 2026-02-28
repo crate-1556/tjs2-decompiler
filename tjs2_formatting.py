@@ -1077,16 +1077,14 @@ def _merge_else_if_pass(source: str) -> str:
             i += 1
             continue
 
-        var_lines = []
         scan = i + 1
-        while scan < len(lines):
+        if scan < len(lines):
             ln = lines[scan].rstrip()
             if (ln.startswith(inner_indent)
                     and re.match(r'^var\s+\w+\s*;\s*$', ln[len(inner_indent):])):
-                var_lines.append(lines[scan])
-                scan += 1
-            else:
-                break
+                result.append(lines[i])
+                i += 1
+                continue
 
         if_line_idx = scan
 
@@ -1132,8 +1130,6 @@ def _merge_else_if_pass(source: str) -> str:
             i += 1
             continue
 
-        for vl in var_lines:
-            result.append(vl)
         if_content = lines[if_line_idx].rstrip()[len(inner_indent):]
         result.append(base_indent + '} else ' + if_content)
 
