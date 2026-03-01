@@ -15,14 +15,24 @@ def format_source(source: str) -> str:
             result.append(line)
         else:
             formatted = _format_long_line(line, max_line)
-            final = []
-            for fl in formatted:
-                if len(fl) > max_line and fl != line:
-                    sub = _format_long_line(fl, max_line)
-                    final.extend(sub)
-                else:
-                    final.append(fl)
-            result.extend(final)
+            pending = formatted
+            for _pass in range(3):
+                still_long = False
+                next_pending = []
+                for fl in pending:
+                    if len(fl) > max_line:
+                        sub = _format_long_line(fl, max_line)
+                        if len(sub) > 1 or (len(sub) == 1 and sub[0] != fl):
+                            next_pending.extend(sub)
+                            still_long = True
+                        else:
+                            next_pending.append(fl)
+                    else:
+                        next_pending.append(fl)
+                pending = next_pending
+                if not still_long:
+                    break
+            result.extend(pending)
     source = '\n'.join(result)
 
     source = _fix_anon_func_indent(source)
@@ -37,6 +47,12 @@ def format_source(source: str) -> str:
         source = _restore_super_calls(source, inheritance_map)
 
     source = _merge_else_if(source)
+
+    source = _collapse_empty_blocks(source)
+
+    source = _normalize_blank_lines(source)
+
+    source = _rename_catch_var(source)
 
     return source
 
@@ -134,6 +150,7 @@ def _format_long_line(line: str, max_line: int = MAX_LINE_LENGTH) -> list:
         _try_format_dict,
         _try_format_array,
         _try_format_condition,
+        _try_format_ternary,
         _try_format_string_concat,
         _try_format_call,
         _try_format_return_expr,
@@ -336,12 +353,15 @@ def _try_format_call(content: str, indent: str, inner_indent: str) -> list:
 
     control_keywords = {'if', 'while', 'for', 'switch', 'catch', 'with'}
 
+    call_pat = re.compile(r'(?:new\s+)?(?:\w+\.)*\w+\s*\(')
     best = None
-    for m in re.finditer(r'(\w+)\s*\(', content):
-        name = m.group(1)
+    for m in call_pat.finditer(content):
+        match_text = m.group(0).rstrip('(').rstrip()
+        name_parts = match_text.split()
+        name = name_parts[-1].split('.')[-1] if name_parts else ''
         if name in control_keywords:
             continue
-        paren_start = content.index('(', m.start())
+        paren_start = m.end() - 1
         paren_end = _find_matching_bracket(content, paren_start, '(', ')')
         if paren_end < 0:
             continue
@@ -355,11 +375,13 @@ def _try_format_call(content: str, indent: str, inner_indent: str) -> list:
             break
 
     if not best:
-        for m in re.finditer(r'(\w+)\s*\(', content):
-            name = m.group(1)
+        for m in call_pat.finditer(content):
+            match_text = m.group(0).rstrip('(').rstrip()
+            name_parts = match_text.split()
+            name = name_parts[-1].split('.')[-1] if name_parts else ''
             if name in control_keywords:
                 continue
-            paren_start = content.index('(', m.start())
+            paren_start = m.end() - 1
             paren_end = _find_matching_bracket(content, paren_start, '(', ')')
             if paren_end < 0:
                 continue
@@ -432,6 +454,11 @@ def _try_format_condition(content: str, indent: str, inner_indent: str) -> list:
     for part in parts[1:]:
         lines.append(f'{cont_indent}{part}')
     lines[-1] = lines[-1] + ')' + suffix
+    if any(len(l) > MAX_LINE_LENGTH for l in lines):
+        greedy = _greedy_condition_wrap(
+            f'{keyword} (', condition, ')' + suffix, indent)
+        if greedy is not None:
+            return greedy
     return lines
 
 def _try_format_return_condition(content, indent, inner_indent, m):
@@ -452,6 +479,10 @@ def _try_format_return_condition(content, indent, inner_indent, m):
     for part in parts[1:]:
         lines.append(f'{cont_indent}{part}')
     lines[-1] = lines[-1] + suffix
+    if any(len(l) > MAX_LINE_LENGTH for l in lines):
+        greedy = _greedy_condition_wrap(prefix, rest, suffix, indent)
+        if greedy is not None:
+            return greedy
     return lines
 
 def _try_format_condition_continuation(content, indent, inner_indent, m):
@@ -476,14 +507,172 @@ def _try_format_condition_continuation(content, indent, inner_indent, m):
 
     parts = _split_condition(inner_rest)
     if len(parts) <= 1:
+        if inner_rest:
+            return _greedy_condition_wrap(
+                f'{op_prefix}{paren_wrap}', inner_rest, suffix, indent)
         return None
 
     cont_indent = indent + INDENT_STR
-    lines = [f'{indent}{op_prefix}{paren_wrap}{parts[0]}']
+    first_line = f'{indent}{op_prefix}{paren_wrap}{parts[0]}'
+    lines = [first_line]
     for part in parts[1:]:
         lines.append(f'{cont_indent}{part}')
     lines[-1] += suffix
+    if any(len(l) > MAX_LINE_LENGTH for l in lines):
+        greedy = _greedy_condition_wrap(
+            f'{op_prefix}{paren_wrap}', inner_rest, suffix, indent)
+        if greedy is not None:
+            return greedy
     return lines
+
+def _greedy_condition_wrap(prefix: str, inner_rest: str, suffix: str,
+                           indent: str) -> list:
+    segments = _find_all_logical_segments(inner_rest)
+    if len(segments) <= 1:
+        return None
+
+    cont_indent = indent + INDENT_STR
+    first_seg = segments[0]
+    current_line = f'{indent}{prefix}{first_seg}'
+    lines = []
+
+    for seg in segments[1:]:
+        candidate = current_line + ' ' + seg
+        if len(candidate) <= MAX_LINE_LENGTH:
+            current_line = candidate
+        else:
+            lines.append(current_line)
+            current_line = f'{cont_indent}{seg}'
+
+    current_line += suffix
+    lines.append(current_line)
+    return lines
+
+def _find_all_logical_segments(text: str) -> list:
+    segments = []
+    current = []
+    in_string = None
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if in_string:
+            if ch == '\\':
+                current.append(ch)
+                i += 1
+                if i < len(text):
+                    current.append(text[i])
+                i += 1
+                continue
+            if ch == in_string:
+                in_string = None
+            current.append(ch)
+        elif ch in ('"', "'"):
+            in_string = ch
+            current.append(ch)
+        elif i + 1 < len(text) and text[i:i+2] in ('&&', '||'):
+            segments.append(''.join(current).strip())
+            op = text[i:i+2]
+            current = [op + ' ']
+            i += 2
+            continue
+        else:
+            current.append(ch)
+        i += 1
+
+    remaining = ''.join(current).strip()
+    if remaining:
+        segments.append(remaining)
+    return segments
+
+def _try_format_ternary(content: str, indent: str, inner_indent: str) -> list:
+    full_line = indent + content
+    if len(full_line) <= MAX_LINE_LENGTH:
+        return None
+
+    q_pos = _find_top_level_ternary_q(content)
+    if q_pos < 0:
+        return None
+
+    c_pos = _find_ternary_colon(content, q_pos + 1)
+    if c_pos < 0:
+        return None
+
+    cond_part = content[:q_pos].rstrip()
+    true_part = content[q_pos + 1:c_pos].strip()
+    false_part_with_suffix = content[c_pos + 1:].strip()
+
+    ternary_rest = f'? {true_part} : {false_part_with_suffix}'
+    first_line = f'{indent}{cond_part}'
+    if len(first_line) <= MAX_LINE_LENGTH and len(inner_indent + ternary_rest) <= MAX_LINE_LENGTH:
+        return [first_line, f'{inner_indent}{ternary_rest}']
+
+    lines = [f'{indent}{cond_part}']
+    q_line = f'{inner_indent}? {true_part}'
+    c_line = f'{inner_indent}: {false_part_with_suffix}'
+    merged = f'{indent}{cond_part} ? {true_part}'
+    if len(merged) <= MAX_LINE_LENGTH:
+        lines = [merged]
+        lines.append(c_line)
+    else:
+        lines.append(q_line)
+        lines.append(c_line)
+    return lines
+
+def _find_top_level_ternary_q(text: str) -> int:
+    depth = 0
+    in_string = None
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if in_string:
+            if ch == '\\':
+                i += 2
+                continue
+            if ch == in_string:
+                in_string = None
+        elif ch in ('"', "'"):
+            in_string = ch
+        elif ch in ('(', '[', '{'):
+            depth += 1
+        elif ch in (')', ']', '}'):
+            depth -= 1
+        elif depth == 0 and ch == '?':
+            if i + 1 < len(text) and text[i + 1] == '.':
+                i += 2
+                continue
+            return i
+        i += 1
+    return -1
+
+def _find_ternary_colon(text: str, start: int) -> int:
+    depth = 0
+    in_string = None
+    ternary_depth = 0
+    i = start
+    while i < len(text):
+        ch = text[i]
+        if in_string:
+            if ch == '\\':
+                i += 2
+                continue
+            if ch == in_string:
+                in_string = None
+        elif ch in ('"', "'"):
+            in_string = ch
+        elif ch in ('(', '[', '{'):
+            depth += 1
+        elif ch in (')', ']', '}'):
+            depth -= 1
+        elif depth == 0 and ch == '?':
+            if not (i + 1 < len(text) and text[i + 1] == '.'):
+                ternary_depth += 1
+        elif depth == 0 and ch == ':':
+            if ternary_depth > 0:
+                ternary_depth -= 1
+            else:
+                return i
+        i += 1
+    return -1
 
 def _split_condition(condition: str) -> list:
     parts = []
@@ -543,11 +732,9 @@ def _try_format_string_concat(content: str, indent: str, inner_indent: str) -> l
         r'(\w+(?:\.\w+)*\s*\+=\s*)',
         r'(\w+(?:\.\w+)*\s*=\s*)',
         r'(throw\s+new\s+\w+\()',
-        r'(dm\()',
-        r'(System\.inform\()',
-        r'(Debug\.notice\()',
-        r'(\w+\.sprintf\()',
+        r'((?:new\s+)?(?:\w+\.)*\w+\()',
         r'(return\s+)',
+        r'(filter:\s*\[)',
     ]
 
     for pat in patterns:
@@ -562,10 +749,17 @@ def _try_format_string_concat(content: str, indent: str, inner_indent: str) -> l
         if len(parts) <= 1:
             continue
 
-        lines = [f'{indent}{prefix_part}{parts[0]}']
+        result_lines = [f'{indent}{prefix_part}{parts[0]}']
         for part in parts[1:]:
-            lines.append(f'{inner_indent}+ {part}')
-        return lines
+            candidate = result_lines[-1] + ' + ' + part
+            if len(candidate) <= MAX_LINE_LENGTH:
+                result_lines[-1] = candidate
+            else:
+                result_lines.append(f'{inner_indent}+ {part}')
+        new_long = sum(1 for l in result_lines if len(l) > MAX_LINE_LENGTH)
+        if new_long > 1:
+            continue
+        return result_lines
 
     return None
 
@@ -721,6 +915,9 @@ def _try_format_comma_continuation(content: str, indent: str, inner_indent: str)
             lines.append(f'{indent}{part}{comma}')
         else:
             lines.append(f'{inner_indent}{part}{comma}')
+    new_long = sum(1 for l in lines if len(l) > MAX_LINE_LENGTH)
+    if new_long > 1:
+        return None
     return lines
 
 def _split_at_plus(text: str) -> list:
@@ -1145,3 +1342,300 @@ def _merge_else_if_pass(source: str) -> str:
         i = close_idx + 1
 
     return '\n'.join(result)
+
+def _collapse_empty_blocks(source: str) -> str:
+    lines = source.split('\n')
+    result = []
+    i = 0
+    while i < len(lines):
+        if (i + 1 < len(lines) and
+            lines[i].rstrip().endswith('{') and
+            lines[i + 1].strip() == '}'):
+            result.append(lines[i].rstrip() + ' }')
+            i += 2
+        else:
+            result.append(lines[i])
+            i += 1
+    return '\n'.join(result)
+
+def _normalize_blank_lines(source: str) -> str:
+    lines = source.split('\n')
+    result = _compress_consecutive_blanks(lines)
+    result = _insert_structural_blanks(result)
+    result = _separate_multiline_stmts(result)
+    result = _fix_registration_blanks(result)
+    result = _compress_consecutive_blanks(result)
+    while result and result[0].strip() == '':
+        result.pop(0)
+    while result and result[-1].strip() == '':
+        result.pop()
+    return '\n'.join(result)
+
+def _compress_consecutive_blanks(lines):
+    result = []
+    prev_blank = False
+    for line in lines:
+        if line.strip() == '':
+            if prev_blank:
+                continue
+            prev_blank = True
+        else:
+            prev_blank = False
+        result.append(line)
+    return result
+
+def _insert_structural_blanks(lines):
+    result = []
+    depth = 0
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+
+        open_count = _count_structural_braces(line, '{')
+        close_count = _count_structural_braces(line, '}')
+
+        if stripped.startswith('}'):
+            line_depth = depth - close_count
+            if line_depth < 0:
+                line_depth = 0
+        else:
+            line_depth = depth
+
+        if result and stripped != '' and stripped != '}':
+            prev = result[-1].strip()
+            prev_is_blank = (prev == '')
+
+            if not prev_is_blank:
+                need_blank = False
+
+                if line_depth == 0:
+                    is_definition = (stripped.startswith('function ') or
+                                    stripped.startswith('class ') or
+                                    stripped.startswith('property '))
+                    is_registration = (stripped.startswith('this.') or
+                                      stripped.startswith('global.'))
+                    if prev == '}':
+                        if not is_registration:
+                            need_blank = True
+                    if is_definition:
+                        if prev != '' and not prev.startswith('//') and prev != '{':
+                            need_blank = True
+
+                elif line_depth == 1:
+                    if prev == '}':
+                        if (stripped.startswith('function ') or
+                            stripped.startswith('class ') or
+                            stripped.startswith('property ') or
+                            stripped.startswith('var ') or
+                            stripped.startswith('this.')):
+                            need_blank = True
+                    if (prev.endswith(';') and
+                        _is_var_decl(result[-1]) and
+                        (stripped.startswith('function ') or
+                         stripped.startswith('property '))):
+                        need_blank = True
+
+                if need_blank:
+                    result.append('')
+
+        if stripped == '}' or stripped.startswith('} else'):
+            if result and result[-1].strip() == '':
+                result.pop()
+
+        if stripped == '' and result:
+            prev_stripped = result[-1].strip()
+            if (prev_stripped.endswith('{') and
+                (prev_stripped.startswith('class ') or
+                 (' extends ' in prev_stripped and '{' in prev_stripped))):
+                continue
+
+        result.append(line)
+
+        depth += open_count - close_count
+        if depth < 0:
+            depth = 0
+
+    return result
+
+def _separate_multiline_stmts(lines):
+    depth = 0
+    line_info = []
+    for line in lines:
+        s = line.strip()
+        opens = _count_structural_braces(line, '{')
+        closes = _count_structural_braces(line, '}')
+        if s.startswith('}'):
+            line_depth = max(0, depth - closes)
+        else:
+            line_depth = depth
+        new_depth = max(0, depth + opens - closes)
+        line_info.append((line_depth, new_depth, s, opens))
+        depth = new_depth
+
+    max_depth = max((info[1] for info in line_info), default=0) + 1
+    stmt_start = [-1] * (max_depth + 1)
+    stmts = []
+
+    for i, (line_depth, new_depth, s, opens) in enumerate(line_info):
+        if s == '':
+            d = line_depth
+            if stmt_start[d] >= 0:
+                stmts.append((stmt_start[d], i - 1, d))
+                stmt_start[d] = -1
+            continue
+
+        if stmt_start[line_depth] < 0:
+            stmt_start[line_depth] = i
+
+        is_terminating = (s.endswith(';') or s.endswith('{ }') or
+                          s == '}' or (s.endswith('}') and opens == 0))
+        if is_terminating and stmt_start[new_depth] >= 0:
+            stmts.append((stmt_start[new_depth], i, new_depth))
+            stmt_start[new_depth] = -1
+
+    for d in range(max_depth + 1):
+        if stmt_start[d] >= 0:
+            stmts.append((stmt_start[d], len(lines) - 1, d))
+
+    stmts.sort()
+
+    from collections import defaultdict
+    by_depth = defaultdict(list)
+    for start, end, d in stmts:
+        by_depth[d].append((start, end))
+
+    insert_before = set()
+    for d, depth_stmts in by_depth.items():
+        depth_stmts.sort()
+        for j in range(1, len(depth_stmts)):
+            prev_s, prev_e = depth_stmts[j - 1]
+            curr_s, curr_e = depth_stmts[j]
+
+            if curr_s > prev_e + 1:
+                continue
+
+            prev_len = prev_e - prev_s + 1
+            curr_len = curr_e - curr_s + 1
+
+            if (prev_len >= 3 or curr_len >= 3) and d == 0:
+                insert_before.add(curr_s)
+
+    result = []
+    for i, line in enumerate(lines):
+        if i in insert_before:
+            result.append('')
+        result.append(line)
+
+    return result
+
+def _count_structural_braces(line, brace_char):
+    count = 0
+    in_string = None
+    i = 0
+    s = line
+    while i < len(s):
+        ch = s[i]
+        if in_string:
+            if ch == '\\':
+                i += 2
+                continue
+            if ch == in_string:
+                in_string = None
+        else:
+            if ch == '/' and i + 1 < len(s) and s[i+1] == '/':
+                break
+            if ch == '"' or ch == "'":
+                in_string = ch
+            elif ch == brace_char:
+                count += 1
+        i += 1
+    return count
+
+def _is_var_decl(line):
+    stripped = line.strip()
+    return stripped.startswith('var ')
+
+_REGISTRATION_RE = re.compile(
+    r'^(this|global)\.(\w+)\s*=\s*(\w+)\s*(incontextof\s+\w+\s*)?;$'
+)
+
+def _is_registration_line(line):
+    s = line.strip()
+    m = _REGISTRATION_RE.match(s)
+    if not m:
+        return False
+    prop_name = m.group(2)
+    value_name = m.group(3)
+    return prop_name == value_name
+
+def _fix_registration_blanks(lines):
+    result = []
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+
+        if _is_registration_line(line):
+            while result and result[-1].strip() == '':
+                result.pop()
+            result.append(line)
+        else:
+            result.append(line)
+
+    return result
+
+def _find_catch_brace(source, open_pos):
+    depth = 0
+    i = open_pos
+    n = len(source)
+    while i < n:
+        if source[i] == '{':
+            depth += 1
+        elif source[i] == '}':
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+def _rename_catch_var(source):
+    pattern = re.compile(r'\bcatch\s*\(\s*([a-zA-Z_]\w*)\s*\)')
+    offset = 0
+
+    while True:
+        m = pattern.search(source, offset)
+        if not m:
+            break
+
+        var_name = m.group(1)
+        if var_name == 'e':
+            offset = m.end()
+            continue
+
+        brace_pos = source.find('{', m.end())
+        if brace_pos == -1:
+            offset = m.end()
+            continue
+
+        if source[m.end():brace_pos].strip():
+            offset = m.end()
+            continue
+
+        close_brace = _find_catch_brace(source, brace_pos)
+        if close_brace == -1:
+            offset = m.end()
+            continue
+
+        catch_decl_new = 'catch (e)'
+        source = source[:m.start()] + catch_decl_new + source[m.end():]
+        delta = len(catch_decl_new) - (m.end() - m.start())
+        brace_pos += delta
+        close_brace += delta
+
+        body = source[brace_pos:close_brace + 1]
+        word_re = re.compile(r'\b' + re.escape(var_name) + r'\b')
+        new_body = word_re.sub('e', body)
+        source = source[:brace_pos] + new_body + source[close_brace + 1:]
+        close_brace += len(new_body) - len(body)
+
+        offset = close_brace
+
+    return source
