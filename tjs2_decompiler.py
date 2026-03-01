@@ -2264,6 +2264,7 @@ class Decompiler:
             if r1 >= -2 or r2 < 0:
                 continue
             next_read_is_cmp = False
+            found_read = False
             for j in range(i + 1, len(instructions)):
                 nxt = instructions[j]
                 if nxt.op in (VM.JMP, VM.JF, VM.JNF, VM.RET, VM.THROW):
@@ -2273,9 +2274,10 @@ class Decompiler:
                     break
                 read_regs = _get_read_regs(nxt)
                 if r2 in read_regs:
+                    found_read = True
                     next_read_is_cmp = nxt.op in _comparison_ops
                     break
-            if not next_read_is_cmp:
+            if found_read and not next_read_is_cmp:
                 self._cp_side_effect_alias_addrs.add(instr.addr)
 
     def _detect_cp_alias_overwrites(self, instructions: List[Instruction]):

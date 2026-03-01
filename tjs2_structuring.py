@@ -2931,6 +2931,58 @@ def _detect_assignment_in_condition(preamble_stmts: List[Stmt], cond: Expr,
                     preamble_stmts.append(VarDeclStmt(last_stmt.name))
     return cond
 
+def _strip_embedded_assigns_from_regs(regs: dict) -> None:
+    for r in list(regs.keys()):
+        cleaned = _strip_assign_from_expr(regs[r])
+        if cleaned is not regs[r]:
+            regs[r] = cleaned
+
+def _strip_assign_from_expr(expr: Expr) -> Expr:
+    if isinstance(expr, AssignExpr):
+        return expr.target
+    if isinstance(expr, TypeofExpr):
+        inner = _strip_assign_from_expr(expr.target)
+        if inner is not expr.target:
+            return TypeofExpr(inner)
+    elif isinstance(expr, BinaryExpr):
+        left = _strip_assign_from_expr(expr.left)
+        right = _strip_assign_from_expr(expr.right)
+        if left is not expr.left or right is not expr.right:
+            return BinaryExpr(left, expr.op, right)
+    elif isinstance(expr, UnaryExpr):
+        inner = _strip_assign_from_expr(expr.operand)
+        if inner is not expr.operand:
+            return UnaryExpr(expr.op, inner)
+    elif isinstance(expr, IsValidExpr):
+        inner = _strip_assign_from_expr(expr.target)
+        if inner is not expr.target:
+            return IsValidExpr(inner)
+    elif isinstance(expr, TypeCastExpr):
+        inner = _strip_assign_from_expr(expr.operand)
+        if inner is not expr.operand:
+            return TypeCastExpr(expr.cast_type, inner)
+    elif isinstance(expr, PropertyExpr):
+        obj = _strip_assign_from_expr(expr.obj)
+        if obj is not expr.obj:
+            return PropertyExpr(obj, expr.prop)
+    elif isinstance(expr, MethodCallExpr):
+        obj = _strip_assign_from_expr(expr.obj)
+        args = [_strip_assign_from_expr(a) for a in expr.args]
+        if obj is not expr.obj or any(a is not b for a, b in zip(args, expr.args)):
+            return MethodCallExpr(obj, expr.method, args)
+    elif isinstance(expr, CallExpr):
+        func = _strip_assign_from_expr(expr.func)
+        args = [_strip_assign_from_expr(a) for a in expr.args]
+        if func is not expr.func or any(a is not b for a, b in zip(args, expr.args)):
+            return CallExpr(func, args)
+    elif isinstance(expr, TernaryExpr):
+        c = _strip_assign_from_expr(expr.cond)
+        t = _strip_assign_from_expr(expr.true_val)
+        f = _strip_assign_from_expr(expr.false_val)
+        if c is not expr.cond or t is not expr.true_val or f is not expr.false_val:
+            return TernaryExpr(c, t, f)
+    return expr
+
 def _generate_if(region: Region, cfg: CFG, instructions: List[Instruction],
                   decompiler: 'Decompiler', obj: CodeObject,
                   loop_context: Optional[Tuple[int, int, int]]) -> List[Stmt]:
@@ -2948,6 +3000,7 @@ def _generate_if(region: Region, cfg: CFG, instructions: List[Instruction],
         instructions, decompiler, obj, block.start_idx, block.end_idx
     )
     cond = _detect_assignment_in_condition(preamble_stmts, cond)
+    _strip_embedded_assigns_from_regs(decompiler.regs)
 
     if block.terminator == 'jf':
         if_cond = decompiler._negate_expr(cond)
@@ -3196,6 +3249,7 @@ def _generate_compound_condition_if(region, cfg: CFG, instructions: List[Instruc
         )
         preamble_stmts.extend(block_preamble)
         cond = _detect_assignment_in_condition(preamble_stmts, cond, preamble_before)
+        _strip_embedded_assigns_from_regs(decompiler.regs)
 
         cond, merged_addrs = decompiler._apply_cond_side_effects(
             cond, instructions, block.start_idx, block.end_idx - 1
