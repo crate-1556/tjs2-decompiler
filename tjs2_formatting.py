@@ -54,6 +54,8 @@ def format_source(source: str) -> str:
 
     source = _rename_catch_var(source)
 
+    source = _wrap_toplevel_local_vars(source)
+
     return source
 
 def _fix_anon_func_indent(source: str) -> str:
@@ -1207,7 +1209,7 @@ def _restore_super_calls(source: str, inheritance_map: dict) -> str:
                         break
                 j += 1
 
-        if len(current_parents) == 1:
+        if brace_depth >= 2 and len(current_parents) == 1:
             first_parent = current_parents[0]
             if ('global.' + first_parent + '.') in line:
                 line = _restore_super_in_line(line, first_parent)
@@ -1639,3 +1641,128 @@ def _rename_catch_var(source):
         offset = close_brace
 
     return source
+
+_TOPLEVEL_LOCAL_DECL_RE = re.compile(r'^var (local\d+(?:_\d+)?)\b')
+_DEF_START_RE = re.compile(r'^(class |function |property )')
+
+def _wrap_toplevel_local_vars(source: str) -> str:
+    lines = source.split('\n')
+
+    local_names: set = set()
+    for line in lines:
+        stripped = line.lstrip()
+        if not stripped:
+            continue
+        indent = len(line) - len(stripped)
+        if indent == 0:
+            m = _TOPLEVEL_LOCAL_DECL_RE.match(stripped)
+            if m:
+                local_names.add(m.group(1))
+
+    if not local_names:
+        return source
+
+    names_alt = '|'.join(re.escape(n)
+                         for n in sorted(local_names, key=len, reverse=True))
+    ref_re = re.compile(r'\b(' + names_alt + r')\b')
+
+    in_definition = [False] * len(lines)
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].lstrip()
+        indent = (len(lines[i]) - len(stripped)) if stripped else 999
+        if indent == 0 and _DEF_START_RE.match(stripped):
+            def_start = i
+            for j in range(i + 1, len(lines)):
+                s = lines[j].rstrip()
+                if s == '}':
+                    for k in range(def_start, j + 1):
+                        in_definition[k] = True
+                    i = j + 1
+                    break
+            else:
+                for k in range(def_start, len(lines)):
+                    in_definition[k] = True
+                break
+        else:
+            i += 1
+
+    tsb_starts = []
+    for i, line in enumerate(lines):
+        stripped = line.lstrip()
+        if not stripped:
+            continue
+        indent = len(line) - len(stripped)
+        if indent == 0 and not in_definition[i]:
+            tsb_starts.append(i)
+
+    if not tsb_starts:
+        return source
+
+    tsbs = []
+    for idx, start in enumerate(tsb_starts):
+        if idx + 1 < len(tsb_starts):
+            end = tsb_starts[idx + 1] - 1
+        else:
+            end = len(lines) - 1
+        while end > start and not lines[end].strip():
+            end -= 1
+        tsbs.append((start, end))
+
+    first_tsb_idx = None
+    last_tsb_idx = None
+    for t_idx, (start, end) in enumerate(tsbs):
+        for i in range(start, end + 1):
+            if in_definition[i]:
+                continue
+            if ref_re.search(lines[i]):
+                if first_tsb_idx is None:
+                    first_tsb_idx = t_idx
+                last_tsb_idx = t_idx
+                break
+
+    if first_tsb_idx is None:
+        return source
+
+    wrap_start = tsbs[first_tsb_idx][0]
+    wrap_end = tsbs[last_tsb_idx][1]
+
+    for i in range(wrap_end + 1, len(lines)):
+        stripped = lines[i].lstrip()
+        if not stripped:
+            continue
+        if in_definition[i]:
+            break
+        indent = len(lines[i]) - len(stripped)
+        if indent > 0:
+            wrap_end = i
+            continue
+        if stripped.startswith('}'):
+            wrap_end = i
+            continue
+        break
+
+    result = []
+    for i, line in enumerate(lines):
+        if i == wrap_start:
+            if result and result[-1].strip():
+                result.append('')
+            result.append('{')
+        if wrap_start <= i <= wrap_end:
+            if line.strip():
+                result.append(INDENT_STR + line)
+            else:
+                result.append('')
+        else:
+            result.append(line)
+        if i == wrap_end:
+            result.append('}')
+            next_non_blank = None
+            for j in range(i + 1, len(lines)):
+                if lines[j].strip():
+                    next_non_blank = j
+                    break
+            if next_non_blank is not None and next_non_blank == i + 1:
+                result.append('')
+
+    return '\n'.join(result)
