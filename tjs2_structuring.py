@@ -4191,6 +4191,7 @@ def _generate_while(region: Region, cfg: CFG, instructions: List[Instruction],
         region._compound_extracted = (extra_cond_blocks, extra_preamble_stmts)
 
     preamble_stmts.extend(extra_preamble_stmts)
+    has_header_preamble = bool(preamble_stmts)
     for extra_cond in extra_cond_blocks:
         loop_cond = BinaryExpr(loop_cond, '&&', extra_cond)
 
@@ -4249,7 +4250,7 @@ def _generate_while(region: Region, cfg: CFG, instructions: List[Instruction],
                         _body_bypasses_tail = True
                         break
 
-    has_for_continue = _has_tail_jmp and _tail_is_pure and not _body_bypasses_tail
+    has_for_continue = _has_tail_jmp and _tail_is_pure and not _body_bypasses_tail and not has_header_preamble
     continue_target = tail_start_addr if has_for_continue else loop_start_addr
 
     if has_for_continue:
@@ -4324,6 +4325,14 @@ def _generate_while(region: Region, cfg: CFG, instructions: List[Instruction],
                     continue
                 real_body.append(s)
             return [DoWhileStmt(loop_cond, preamble_stmts + real_body)]
+
+        if has_header_preamble:
+            loop_body = list(preamble_stmts)
+            loop_body.append(
+                IfStmt(decompiler._negate_expr(loop_cond), [BreakStmt()])
+            )
+            loop_body.extend(body_stmts)
+            return [WhileStmt(ConstExpr(True), loop_body)]
 
         return preamble_stmts + [WhileStmt(loop_cond, body_stmts)]
 
